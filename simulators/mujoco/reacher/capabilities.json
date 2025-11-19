@@ -1,0 +1,750 @@
+{
+	"capabilities": {
+		"input": {
+			"camera": {
+				"0": {
+					"custom_name": "head_camera",
+					"disabled": false,
+					"eccentricity_control": {
+						"X offset percentage": 1,
+						"Y offset percentage": 1
+					},
+					"feagi_index": 0,
+					"index": "00",
+					"mirror": false,
+					"modulation_control": {
+						"X offset percentage": 99,
+						"Y offset percentage": 99
+					},
+					"threshold_default": 1
+				}
+			},
+			"gyro": {
+				"0": {
+					"custom_name": "head_gyro",
+					"disabled": false,
+					"feagi_index": 0,
+					"max_value": [
+						1,
+						1,
+						1
+					],
+					"min_value": [
+						-1,
+						-1,
+						-1
+					]
+				}
+			},
+			"servo_position": {
+				"0": {
+					"custom_name": "abdomen_z",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 0,
+					"max_power": 0.2,
+					"max_value": 0.794,
+					"min_value": -0.578
+				},
+				"1": {
+					"custom_name": "abdomen_y",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 1,
+					"max_power": 0.2,
+					"max_value": 0.531,
+					"min_value": -0.509
+				},
+				"2": {
+					"custom_name": "abdomen_x",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 2,
+					"max_power": 0.2,
+					"max_value": 0.619,
+					"min_value": -0.619
+				},
+				"3": {
+					"custom_name": "hip_x_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 3,
+					"max_power": 0.2,
+					"max_value": 0.162,
+					"min_value": -0.533
+				},
+				"4": {
+					"custom_name": "hip_z_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 4,
+					"max_power": 0.2,
+					"max_value": 0.621,
+					"min_value": -0.567
+				},
+				"5": {
+					"custom_name": "hip_y_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 5,
+					"max_power": 0.2,
+					"max_value": 0.358,
+					"min_value": -2.63
+				},
+				"6": {
+					"custom_name": "knee_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 6,
+					"max_power": 0.2,
+					"max_value": 0.0443,
+					"min_value": -2.8
+				},
+				"7": {
+					"custom_name": "ankle_y_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 7,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.882
+				},
+				"8": {
+					"custom_name": "ankle_x_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 8,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.883
+				},
+				"9": {
+					"custom_name": "hip_x_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 9,
+					"max_power": 0.2,
+					"max_value": 0.132,
+					"min_value": -0.5
+				},
+				"10": {
+					"custom_name": "hip_z_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 10,
+					"max_power": 0.2,
+					"max_value": 0.621,
+					"min_value": -1.06
+				},
+				"11": {
+					"custom_name": "hip_y_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 11,
+					"max_power": 0.2,
+					"max_value": 0.358,
+					"min_value": -2.63
+				},
+				"12": {
+					"custom_name": "knee_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 12,
+					"max_power": 0.2,
+					"max_value": 0.0443,
+					"min_value": -2.8
+				},
+				"13": {
+					"custom_name": "ankle_y_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 13,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.882
+				},
+				"14": {
+					"custom_name": "ankle_x_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 14,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.882
+				},
+				"15": {
+					"custom_name": "shoulder1_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 15,
+					"max_power": 0.2,
+					"max_value": 1.05,
+					"min_value": -1.49
+				},
+				"16": {
+					"custom_name": "shoulder2_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 16,
+					"max_power": 0.2,
+					"max_value": 0.835,
+					"min_value": -1.49
+				},
+				"17": {
+					"custom_name": "elbow_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 17,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -1.75
+				},
+				"18": {
+					"custom_name": "shoulder1_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 18,
+					"max_power": 0.2,
+					"max_value": 1.05,
+					"min_value": -1.49
+				},
+				"19": {
+					"custom_name": "shoulder2_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 19,
+					"max_power": 0.2,
+					"max_value": 1.06,
+					"min_value": -1.49
+				},
+				"20": {
+					"custom_name": "elbow_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 20,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -1.75
+				}
+			},
+			            "pressure": {
+                "0": {
+                    "custom_name": "floor",
+                    "disabled": false,
+                    "feagi_index": 0,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "1": {
+                    "custom_name": "torso",
+                    "disabled": false,
+                    "feagi_index": 3,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "2": {
+                    "custom_name": "waist_upper",
+                    "disabled": false,
+                    "feagi_index": 6,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "3": {
+                    "custom_name": "head",
+                    "disabled": false,
+                    "feagi_index": 9,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "4": {
+                    "custom_name": "waist_lower",
+                    "disabled": false,
+                    "feagi_index": 12,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "5": {
+                    "custom_name": "butt",
+                    "disabled": false,
+                    "feagi_index": 15,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "6": {
+                    "custom_name": "thigh_right",
+                    "disabled": false,
+                    "feagi_index": 18,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "7": {
+                    "custom_name": "shin_right",
+                    "disabled": false,
+                    "feagi_index": 21,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "8": {
+                    "custom_name": "foot1_right",
+                    "disabled": false,
+                    "feagi_index": 24,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "9": {
+                    "custom_name": "foot2_right",
+                    "disabled": false,
+                    "feagi_index": 27,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "10": {
+                    "custom_name": "thigh_left",
+                    "disabled": false,
+                    "feagi_index": 30,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "11": {
+                    "custom_name": "shin_left",
+                    "disabled": false,
+                    "feagi_index": 33,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "12": {
+                    "custom_name": "foot1_left",
+                    "disabled": false,
+                    "feagi_index": 36,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "13": {
+                    "custom_name": "foot2_left",
+                    "disabled": false,
+                    "feagi_index": 39,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "14": {
+                    "custom_name": "upper_arm_right",
+                    "disabled": false,
+                    "feagi_index": 42,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "15": {
+                    "custom_name": "lower_arm_right",
+                    "disabled": false,
+                    "feagi_index": 45,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "16": {
+                    "custom_name": "hand_right",
+                    "disabled": false,
+                    "feagi_index": 48,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "17": {
+                    "custom_name": "upper_arm_left",
+                    "disabled": false,
+                    "feagi_index": 51,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "18": {
+                    "custom_name": "lower_arm_left",
+                    "disabled": false,
+                    "feagi_index": 54,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                },
+                "19": {
+                    "custom_name": "hand_left",
+                    "disabled": false,
+                    "feagi_index": 57,
+                    "max_value": [
+                        30,
+                        30,
+                        30
+                    ],
+                    "min_value": [
+                        -30,
+                        -30,
+                        -30
+                    ]
+                }
+            },
+			"proximity": {
+				"0": {
+					"custom_name": "waist",
+					"disabled": false,
+					"feagi_index": 0,
+					"max_value": 1,
+					"min_value": 0
+				},
+				"1": {
+					"custom_name": "shoulder1_left",
+					"disabled": false,
+					"feagi_index": 1,
+					"max_value": 1,
+					"min_value": 0
+				},
+				"2": {
+					"custom_name": "shoulder1_right",
+					"disabled": false,
+					"feagi_index": 2,
+					"max_value": 1,
+					"min_value": 0
+				}
+			}
+		},
+		"output": {
+			"servo": {
+				"0": {
+					"custom_name": "abdomen_z",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 0,
+					"max_power": 0.2,
+					"max_value": 0.794,
+					"min_value": -0.578
+				},
+				"1": {
+					"custom_name": "abdomen_y",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 1,
+					"max_power": 0.2,
+					"max_value": 0.531,
+					"min_value": -0.509
+				},
+				"2": {
+					"custom_name": "abdomen_x",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 2,
+					"max_power": 0.2,
+					"max_value": 0.619,
+					"min_value": -0.619
+				},
+				"3": {
+					"custom_name": "hip_x_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 3,
+					"max_power": 0.2,
+					"max_value": 0.162,
+					"min_value": -0.533
+				},
+				"4": {
+					"custom_name": "hip_z_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 4,
+					"max_power": 0.2,
+					"max_value": 0.621,
+					"min_value": -0.567
+				},
+				"5": {
+					"custom_name": "hip_y_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 5,
+					"max_power": 0.2,
+					"max_value": 0.358,
+					"min_value": -2.63
+				},
+				"6": {
+					"custom_name": "knee_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 6,
+					"max_power": 0.2,
+					"max_value": 0.0443,
+					"min_value": -2.8
+				},
+				"7": {
+					"custom_name": "ankle_y_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 7,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.882
+				},
+				"8": {
+					"custom_name": "ankle_x_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 8,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.883
+				},
+				"9": {
+					"custom_name": "hip_x_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 9,
+					"max_power": 0.2,
+					"max_value": 0.132,
+					"min_value": -0.5
+				},
+				"10": {
+					"custom_name": "hip_z_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 10,
+					"max_power": 0.2,
+					"max_value": 0.621,
+					"min_value": -1.06
+				},
+				"11": {
+					"custom_name": "hip_y_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 11,
+					"max_power": 0.2,
+					"max_value": 0.358,
+					"min_value": -2.63
+				},
+				"12": {
+					"custom_name": "knee_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 12,
+					"max_power": 0.2,
+					"max_value": 0.0443,
+					"min_value": -2.8
+				},
+				"13": {
+					"custom_name": "ankle_y_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 13,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.882
+				},
+				"14": {
+					"custom_name": "ankle_x_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 14,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -0.882
+				},
+				"15": {
+					"custom_name": "shoulder1_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 15,
+					"max_power": 0.2,
+					"max_value": 1.05,
+					"min_value": -1.49
+				},
+				"16": {
+					"custom_name": "shoulder2_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 16,
+					"max_power": 0.2,
+					"max_value": 0.835,
+					"min_value": -1.49
+				},
+				"17": {
+					"custom_name": "elbow_right",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 17,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -1.75
+				},
+				"18": {
+					"custom_name": "shoulder1_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 18,
+					"max_power": 0.2,
+					"max_value": 1.05,
+					"min_value": -1.49
+				},
+				"19": {
+					"custom_name": "shoulder2_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 19,
+					"max_power": 0.2,
+					"max_value": 1.06,
+					"min_value": -1.49
+				},
+				"20": {
+					"custom_name": "elbow_left",
+					"default_value": 0,
+					"disabled": false,
+					"feagi_index": 20,
+					"max_power": 0.2,
+					"max_value": 0.882,
+					"min_value": -1.75
+				}
+			}
+		}
+	}
+}

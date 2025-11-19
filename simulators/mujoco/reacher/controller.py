@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-MuJoCo Humanoid Controller - Using FEAGI Python SDK
+MuJoCo Reacher Controller - Using FEAGI Python SDK
 Copyright 2016-2025 Neuraville Inc.
 """
 import sys
@@ -28,10 +28,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ip', default='127.0.0.1', help='FEAGI IP address')
     parser.add_argument('--port', type=int, default=8000, help='FEAGI HTTP port')
-    parser.add_argument('--model_xml_path', default='./humanoid.xml', help='MuJoCo model path')
+    parser.add_argument('--model_xml_path', default='./reacher.xml', help='MuJoCo model path')
     args = parser.parse_args()
-    
-    print("🚀 MuJoCo Humanoid Controller (FEAGI Python SDK)")
+
+    print("🚀 MuJoCo Reacher Controller (FEAGI Python SDK)")
     print(f"📍 FEAGI: {args.ip}:{args.port}")
     print(f"🤖 Model: {args.model_xml_path}")
     
@@ -49,9 +49,9 @@ def main():
         print("❌ FEAGI SDK not installed")
         print("   Install with: pip install feagi")
         return 1
-    
+
     print("\n🔌 Connecting to FEAGI...")
-    feagi_client = FeagiAgentClient("mujoco_humanoid_01", AgentType.BOTH)
+    feagi_client = FeagiAgentClient("mujoco_reacher_01", AgentType.BOTH)
     
     # Configure with vision and motor capabilities
     feagi_client.configure(
@@ -68,7 +68,7 @@ def main():
         ),
         motor_capability=(
             "servo",               # modality
-            21,                    # output count
+            2,                     # output count (2 joints)
             ["o_motor"]            # source cortical areas
         ),
         heartbeat_interval=5.0,
@@ -86,8 +86,8 @@ def main():
     feagi_ok = True  # Track if FEAGI communication is working
     
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        # Reset to standing pose (keyframe 4 is standing)
-        mujoco.mj_resetDataKeyframe(model, data, 4)
+        # Reset to initial pose
+        mujoco.mj_resetData(model, data)
         
         print("✅ Viewer running!")
         print("   Press ESC in the viewer window to exit")
@@ -114,13 +114,13 @@ def main():
             if feagi_ok:
                 # Send sensor data to FEAGI (every 10 frames to reduce bandwidth)
                 if frame_number % 10 == 0:
-                    try:
-                        # Convert joint positions to neuron activations
-                        neuron_pairs = []
-                        for i in range(min(21, len(data.qpos))):
-                            neuron_id = i
-                            potential = float(data.qpos[i] * 50.0)  # Scale to reasonable range
-                            neuron_pairs.append((neuron_id, potential))
+                try:
+                    # Convert joint positions to neuron activations
+                    neuron_pairs = []
+                    for i in range(min(2, len(data.qpos))):
+                        neuron_id = i
+                        potential = float(data.qpos[i] * 50.0)  # Scale to reasonable range
+                        neuron_pairs.append((neuron_id, potential))
                         
                         feagi_client.send_sensory_data(neuron_pairs)
                     except Exception as e:
