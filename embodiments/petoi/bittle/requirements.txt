@@ -1,0 +1,2 @@
+feagi[bluetooth]>=2.0.0
+

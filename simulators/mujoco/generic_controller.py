@@ -31,13 +31,14 @@ def main():
     print(f"🤖 Model: {args.model_xml}")
     print(f"🆔 Agent ID: {args.agent_id}")
 
-    # Load MuJoCo model
+    # Load MuJoCo model from provided path
     try:
+        print(f"📂 Loading model from: {args.model_xml}")
         model = mujoco.MjModel.from_xml_path(args.model_xml)
         data = mujoco.MjData(model)
         print(f"✅ Model loaded: {model.nq} DOF, {model.nu} actuators")
     except Exception as e:
-        print(f"❌ Failed to load model: {e}")
+        print(f"❌ Failed to load model '{args.model_xml}': {e}")
         return 1
 
     # Determine number of actuated joints (skip free joints)
