@@ -1,0 +1,61 @@
+[package]
+name = "feagi-microbit-controller"
+version = "0.1.0"
+edition = "2021"
+authors = ["FEAGI Team <team@neuraville.com>"]
+license = "MIT"
+description = "FEAGI controller firmware for BBC micro:bit devices"
+repository = "https://github.com/feagi/FEAGI-2.0"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+embedded-hal = "1.0"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde-json-core = "0.5"
+heapless = "0.8"
+static_cell = "1.3"
+
+# micro:bit V2 dependencies
+# Using microbit-bsp with trouble feature for BLE support
+microbit-bsp = { version = "0.4", features = ["trouble"] }
+
+# Bluetooth Low Energy - Using TrouBLE (pure Rust, MIT/Apache-2.0 license)
+# NOTE: We abandoned nrf-softdevice due to license issues (proprietary SoftDevice binary)
+# TrouBLE is a pure Rust BLE Host implementation from embassy-rs
+# Upgraded to embassy-nrf 0.8.x for TrouBLE compatibility
+# Note: microbit-bsp 0.4.0 requires embassy-nrf 0.4.x
+# We'll let microbit-bsp manage embassy-nrf version
+# But we need embassy-executor and embassy-time for the main macro and timers
+embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
+embassy-time = { version = "0.4", features = ["tick-hz-32_768"] }
+# TrouBLE for BLE (pure Rust, MIT/Apache-2.0 license) - included via microbit-bsp trouble feature
+
+# Sensor drivers (optional - for future I2C implementation)
+[dependencies.lsm303agr]
+version = "0.3"
+optional = true
+
+
+[features]
+default = []
+
+# Build profiles
+[profile.dev]
+opt-level = "s"      # Optimize for size even in dev
+debug = true
+lto = false
+
+[profile.release]
+opt-level = "z"      # Optimize aggressively for size
+debug = false
+lto = true           # Link-time optimization
+codegen-units = 1    # Better optimization
+strip = true         # Strip symbols
+
+# Flash size optimization
+[profile.release.package."*"]
+opt-level = "z"
+
+

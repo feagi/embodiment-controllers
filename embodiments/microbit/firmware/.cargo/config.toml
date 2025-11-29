@@ -1,0 +1,29 @@
+[build]
+# Target for micro:bit V2 (nRF52833, ARM Cortex-M4)
+target = "thumbv7em-none-eabihf"
+
+# Use custom linker script
+[target.thumbv7em-none-eabihf]
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+  "-C", "inline-threshold=5",
+  "-C", "no-vectorize-loops",
+]
+runner = "probe-rs run --chip nRF52833_xxAA"
+
+# Target for micro:bit V1 (nRF51822, ARM Cortex-M0)
+[target.thumbv6m-none-eabi]
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+  "-C", "inline-threshold=5",
+]
+runner = "probe-rs run --chip nRF51822_xxAA"
+
+[alias]
+# Convenient build aliases
+build-v2 = "build --release --features v2 --target thumbv7em-none-eabihf"
+build-v1 = "build --release --features v1 --target thumbv6m-none-eabi"
+flash-v2 = "run --release --features v2 --target thumbv7em-none-eabihf"
+flash-v1 = "run --release --features v1 --target thumbv6m-none-eabi"
+
+
