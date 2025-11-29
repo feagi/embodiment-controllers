@@ -2,18 +2,47 @@
 #![no_main]
 
 use panic_halt as _;
+
+// Minimal defmt implementation (required by embassy-executor/nrf-sdc)
+#[defmt::global_logger]
+struct Logger;
+
+unsafe impl defmt::Logger for Logger {
+    fn acquire() {
+        // No-op: we're not using defmt for logging
+    }
+    unsafe fn release() {
+        // No-op
+    }
+    unsafe fn flush() {
+        // No-op
+    }
+    unsafe fn write(_bytes: &[u8]) {
+        // No-op: discard defmt output
+    }
+}
+
+// Required by defmt for panic handling
+#[defmt::panic_handler]
+fn panic() -> ! {
+    // Use panic-halt's panic handler
+    cortex_m::asm::bkpt();
+    loop {
+        cortex_m::asm::wfi();
+    }
+}
 use microbit_bsp::Microbit;
+use microbit_bsp::ble::{MultiprotocolServiceLayer, SoftdeviceController};
 // BLE will be implemented using TrouBLE via microbit-bsp (pure Rust, MIT license)
 
+mod ble_compat;
 mod ble_stack;
 mod bluetooth;
 mod gpio_controller;
-mod led_display;
 mod sensors;
 
 use bluetooth::BluetoothService;
 use gpio_controller::GpioController;
-use led_display::LedDisplay;
 use sensors::Sensors;
 
 // Include build-time configuration
@@ -36,9 +65,32 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let board = Microbit::default();
     
     // Get display from board (microbit-bsp manages peripherals)
-    let display = board.display;
+    // The display field is a LedMatrix
+    let mut display = board.display;
     
-    let mut display_wrapper = LedDisplay::new(display);
+    // Initialize BLE using microbit-bsp's built-in TrouBLE support
+    // When trouble feature is enabled, board has a 'ble' field
+    let (sdc, mpsl) = board
+        .ble
+        .init(board.timer0, board.rng)
+        .expect("BLE Stack failed to initialize");
+    
+    // Spawn MPSL task to run the Multiprotocol Service Layer
+    _spawner.must_spawn(mpsl_task(mpsl));
+    
+    // Initialize BLE stack with Softdevice Controller
+    let mut ble_stack = ble_stack::BleStack::new(BLUETOOTH_NAME, sdc).await
+        .expect("Failed to initialize BLE stack");
+    
+    // Start BLE advertising
+    ble_stack.start_advertising(BLUETOOTH_NAME).await
+        .expect("Failed to start BLE advertising");
+    
+    // Spawn BLE task to handle events
+    _spawner.must_spawn(ble_task(ble_stack));
+    
+    // Create a simple display buffer for LED matrix
+    let mut display_buffer = [[0u8; 5]; 5];
     let mut sensors = Sensors::new();
     let mut gpio = GpioController::new();
     let mut bluetooth = BluetoothService::new(BLUETOOTH_NAME);
@@ -46,27 +98,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // Startup sequence: Show FEAGI letters
     use embassy_time::{Duration, Timer};
     
-    display_wrapper.show_letter_f();
-    display_wrapper.show().await;
-    Timer::after(Duration::from_millis(500)).await;
+    // Skip startup sequence for now - focus on BLE integration
+    // Display will be updated in main loop based on neuron firing
+    // TODO: Fix display API once we understand Frame/Bitmap generics
     
-    display_wrapper.show_letter_e();
-    display_wrapper.show().await;
-    Timer::after(Duration::from_millis(500)).await;
-    
-    display_wrapper.show_letter_a();
-    display_wrapper.show().await;
-    Timer::after(Duration::from_millis(500)).await;
-    
-    display_wrapper.show_letter_g();
-    display_wrapper.show().await;
-    Timer::after(Duration::from_millis(500)).await;
-    
-    display_wrapper.show_letter_i();
-    display_wrapper.show().await;
-    Timer::after(Duration::from_millis(500)).await;
-    
-    display_wrapper.clear();
+    // Skip startup sequence for now - focus on BLE integration
+    // Display will be updated in main loop based on neuron firing
     
     // Main control loop (async)
     let mut loop_count: u32 = 0;
@@ -92,12 +129,24 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 }
                 bluetooth::Command::SetLedMatrix { data } => {
                     if OUTPUT_LED_MATRIX_ENABLED {
-                        display_wrapper.set_matrix(&data);
+                        // Update display buffer from data
+                        for (i, &brightness) in data.iter().enumerate() {
+                            let y = i / 5;
+                            let x = i % 5;
+                            display_buffer[y][x] = brightness;
+                        }
                     }
                 }
                 bluetooth::Command::NeuronFiring { coordinates } => {
                     if OUTPUT_LED_MATRIX_ENABLED {
-                        display_wrapper.update_from_neurons(&coordinates);
+                        // Clear buffer first
+                        display_buffer = [[0; 5]; 5];
+                        // Set LEDs for each fired neuron
+                        for &(x, y) in coordinates.iter() {
+                            if x < 5 && y < 5 {
+                                display_buffer[y as usize][x as usize] = 255;
+                            }
+                        }
                     }
                 }
                 bluetooth::Command::GetCapabilities => {
@@ -112,14 +161,30 @@ async fn main(_spawner: embassy_executor::Spawner) {
         // Check for neuron firing data
         if let Some(neuron_coords) = bluetooth.receive_neuron_data() {
             if OUTPUT_LED_MATRIX_ENABLED {
-                display_wrapper.update_from_neurons(&neuron_coords);
+                // Clear buffer first
+                display_buffer = [[0; 5]; 5];
+                // Set LEDs for each fired neuron
+                for &(x, y) in neuron_coords.iter() {
+                    if x < 5 && y < 5 {
+                        display_buffer[y as usize][x as usize] = 255;
+                    }
+                }
             }
         }
         
-        // Update LED display
-        if OUTPUT_LED_MATRIX_ENABLED {
-            display_wrapper.show().await;
-        }
+        // Update LED display - skip for now until we fix Frame API
+        // TODO: Fix Frame::new API usage
+        // if OUTPUT_LED_MATRIX_ENABLED {
+        //     let mut bitmap = Bitmap::new(5, 5);
+        //     for y in 0..5 {
+        //         for x in 0..5 {
+        //             if display_buffer[y][x] > 127 {
+        //                 bitmap.set(x, y);
+        //             }
+        //         }
+        //     }
+        //     display.display(&Frame::new([bitmap]), Duration::from_millis(30)).await;
+        // }
         
         // Async delay (10ms)
         Timer::after(Duration::from_millis(10)).await;
@@ -127,7 +192,36 @@ async fn main(_spawner: embassy_executor::Spawner) {
     }
 }
 
-// BLE implementation TODO:
-// - Implement using TrouBLE or embassy-nrf BLE (pure Rust, MIT license)
-// - nrf-softdevice removed due to license issues
-// - Once BLE is implemented, integrate with main control loop
+// MPSL task to run the Multiprotocol Service Layer
+#[embassy_executor::task]
+async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
+    mpsl.run().await
+}
+
+// BLE task to handle BLE events
+#[embassy_executor::task]
+async fn ble_task(mut ble_stack: ble_stack::BleStack<'static>) {
+    loop {
+        // Process BLE events
+        ble_stack.process_events().await;
+        
+        // Check for received data and put it in RX buffer
+        if let Some(data) = ble_stack.receive_data().await {
+            unsafe {
+                BLE_RX_BUFFER = Some(data);
+            }
+        }
+        
+        // Check for data to send and send it via BLE
+        unsafe {
+            if let Some(data) = BLE_TX_BUFFER.take() {
+                if let Err(_) = ble_stack.send_notify(&data).await {
+                    // If send fails, put data back (or drop it)
+                }
+            }
+        }
+        
+        // Small delay to prevent busy loop
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
+    }
+}

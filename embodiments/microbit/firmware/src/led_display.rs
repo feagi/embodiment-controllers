@@ -4,13 +4,14 @@ use embassy_time::Duration;
 use heapless::Vec;
 
 // Use type inference - the display type will be inferred from board.display
-pub struct LedDisplay<D> {
-    display: D,
+// We'll use a generic type parameter and let Rust infer it
+pub struct LedDisplay<'a, D> {
+    display: &'a mut D,
     buffer: [[u8; 5]; 5],
 }
 
-impl<D> LedDisplay<D> {
-    pub fn new(display: D) -> Self {
+impl<'a, D> LedDisplay<'a, D> {
+    pub fn new(display: &'a mut D) -> Self {
         Self {
             display,
             buffer: [[0; 5]; 5],
@@ -43,9 +44,9 @@ impl<D> LedDisplay<D> {
         }
     }
     
-    pub async fn show(&mut self) 
+    pub async fn show(&mut self)
     where
-        D: FnMut([[u8; 5]; 5], embassy_time::Duration) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + Send + '_>>,
+        D: DisplayTrait,
     {
         // Convert buffer to LED matrix format (on/off, no brightness for now)
         let mut image = [[0u8; 5]; 5];
@@ -56,10 +57,22 @@ impl<D> LedDisplay<D> {
         }
         
         // Show image using microbit-bsp display API (async)
-        // The display type from microbit-bsp has a display() method
-        use embassy_time::Duration;
-        // We'll need to check the actual API - for now, let's use a simpler approach
-        // self.display.display(image, Duration::from_millis(30)).await;
+        // Based on microbit-bsp examples, we use Frame and Bitmap
+        use microbit_bsp::display::{Frame, Bitmap};
+        
+        // Create bitmap and set pixels
+        let mut bitmap = Bitmap::new(5, 5);
+        for y in 0..5 {
+            for x in 0..5 {
+                if image[y][x] > 0 {
+                    bitmap.set(x, y);
+                }
+            }
+        }
+        
+        // Frame::new takes an array of bitmaps
+        let frame = Frame::new([bitmap]);
+        DisplayTrait::display(self.display, &frame, Duration::from_millis(30)).await;
     }
     
     pub fn show_heart(&mut self) {
@@ -166,5 +179,23 @@ impl<D> LedDisplay<D> {
                 self.set_pixel(x as usize, y as usize, true);
             }
         }
+    }
+}
+
+// Trait to abstract the display API
+trait DisplayTrait {
+    async fn display(&mut self, frame: &microbit_bsp::display::Frame, duration: embassy_time::Duration);
+}
+
+// Implement for LedMatrix - we'll use a blanket impl with type inference
+// The actual LedMatrix type from board.display will be inferred
+impl<W, H, const N: usize> DisplayTrait for microbit_bsp::display::LedMatrix<W, H, N> 
+where
+    W: microbit_bsp::display::Width,
+    H: microbit_bsp::display::Height,
+{
+    async fn display(&mut self, frame: &microbit_bsp::display::Frame, duration: embassy_time::Duration) {
+        // LedMatrix::display takes &self, frame, and duration
+        self.display(frame, duration).await;
     }
 }

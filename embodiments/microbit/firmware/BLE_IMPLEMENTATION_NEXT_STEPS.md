@@ -1,16 +1,14 @@
-# BLE Implementation Status
+# BLE Implementation Next Steps
 
-## Current State
+## Current Status
 
 ✅ **Completed:**
 - Migrated from `microbit-v2` to `microbit-bsp` with `trouble` feature
-- Code compiles successfully (`cargo check` passes)
-- Basic BLE stack structure in place (`ble_stack.rs`)
-- BLE protocol layer implemented (`bluetooth.rs`)
-- Main application structure ready for BLE integration
+- Code compiles successfully
+- Basic structure in place for BLE integration
 
 ⏳ **Pending:**
-- Understand `microbit-bsp` BLE API (`board.ble` type and methods)
+- Understand microbit-bsp's BLE API structure
 - Initialize BLE peripheral from `board.ble`
 - Set up GATT services (Nordic UART Service + FEAGI custom service)
 - Start BLE advertising
@@ -18,8 +16,8 @@
 
 ## Next Steps
 
-1. **Review microbit-bsp ble-trouble example:**
-   - Check: https://github.com/lulf/microbit-bsp/tree/main/examples/ble-trouble
+1. **Check ble-trouble example:**
+   - Review `/examples/ble-trouble/src/main.rs` in microbit-bsp repo
    - Understand how `board.ble` is used
    - See how GATT services are set up
    - Understand advertising and connection handling
@@ -50,16 +48,9 @@
    - Connect from a BLE central device
    - Test data transmission/reception
 
-## Known Issues
-
-- **Release build linking error:** `defmt` symbols not found in release mode
-  - This is a separate issue from BLE implementation
-  - `cargo check` passes, so code is valid
-  - Can be addressed after BLE implementation is complete
-
 ## Resources
 
-- microbit-bsp repository: https://github.com/lulf/microbit-bsp
+- microbit-bsp ble-trouble example: https://github.com/lulf/microbit-bsp/tree/main/examples/ble-trouble
 - TrouBLE documentation: https://github.com/embassy-rs/trouble
 - Nordic UART Service: Standard BLE service for serial communication
-- microbit-bsp docs: https://docs.rs/microbit-bsp
+

@@ -30,7 +30,18 @@ microbit-bsp = { version = "0.4", features = ["trouble"] }
 # But we need embassy-executor and embassy-time for the main macro and timers
 embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
 embassy-time = { version = "0.4", features = ["tick-hz-32_768"] }
-# TrouBLE for BLE (pure Rust, MIT/Apache-2.0 license) - included via microbit-bsp trouble feature
+# embassy-sync version must match trouble-host@0.1.0's requirement (0.6.x)
+embassy-sync = { version = "0.6" }
+# TrouBLE for BLE (pure Rust, MIT/Apache-2.0 license)
+# Using 0.1.0 to match bt-hci@0.2 with nrf-sdc's bt-hci@0.3 (closer compatibility)
+trouble-host = { version = "0.1", features = ["peripheral", "gatt"] }
+# Dependencies for compatibility layer
+embedded-io = "0.6"  # Required by trouble_host::Controller trait
+bt-hci = "0.2"  # Used by trouble-host (explicit dependency)
+# Add bt-hci@0.3 as renamed dependency for type conversions
+bt-hci-v3 = { package = "bt-hci", version = "0.3" }
+nrf-sdc = "0.1"  # For Error type access
+defmt = "1.0"  # Required by embassy-executor/nrf-sdc
 
 # Sensor drivers (optional - for future I2C implementation)
 [dependencies.lsm303agr]
