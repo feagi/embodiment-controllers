@@ -1,13 +1,13 @@
-/* Memory layout for BBC micro:bit V2 (nRF52833) - With SoftDevice S113 */
+/* Memory layout for BBC micro:bit V2 (nRF52833) - Bare Metal (no SoftDevice)
+ * 
+ * We're using TrouBLE/nrf-sdc which doesn't require SoftDevice binary blob.
+ * Firmware starts at 0x00000000 (full 512KB flash available).
+ */
 
 MEMORY
 {
-  /* micro:bit V2 (nRF52833) - SoftDevice S113 reserves:
-   * FLASH: 0x00000000 - 0x00026000 (152KB) for SoftDevice
-   * RAM:   0x20000000 - 0x20008000 (32KB) for SoftDevice
-   */
-  FLASH : ORIGIN = 0x00026000, LENGTH = 512K - 152K  /* Application starts after SoftDevice */
-  RAM   : ORIGIN = 0x20008000, LENGTH = 128K - 32K   /* Application RAM after SoftDevice */
+  FLASH : ORIGIN = 0x00000000, LENGTH = 512K  /* Full flash available (no SoftDevice) */
+  RAM   : ORIGIN = 0x20000000, LENGTH = 128K   /* Full RAM available (no SoftDevice) */
 }
 
 /* This is where the call stack will be allocated. */

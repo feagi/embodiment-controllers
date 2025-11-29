@@ -68,6 +68,114 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // The display field is a LedMatrix
     let mut display = board.display;
     
+    // Startup sequence: Show FEAGI letters (BEFORE BLE init to ensure it always runs)
+    use embassy_time::{Duration, Timer};
+    use microbit_bsp::display::Frame;
+    
+    // Show "F"
+    {
+        let mut frame = Frame::<5, 5>::empty();
+        let pattern = [
+            [1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0],
+            [1, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0],
+        ];
+        for y in 0..5 {
+            for x in 0..5 {
+                if pattern[y][x] > 0 {
+                    frame.set(x, y);
+                }
+            }
+        }
+        display.display(frame, Duration::from_millis(500)).await;
+    }
+    
+    // Show "E"
+    {
+        let mut frame = Frame::<5, 5>::empty();
+        let pattern = [
+            [1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0],
+            [1, 0, 0, 0, 0],
+            [1, 1, 1, 1, 1],
+        ];
+        for y in 0..5 {
+            for x in 0..5 {
+                if pattern[y][x] > 0 {
+                    frame.set(x, y);
+                }
+            }
+        }
+        display.display(frame, Duration::from_millis(500)).await;
+    }
+
+    // Show "A"
+    {
+        let mut frame = Frame::<5, 5>::empty();
+        let pattern = [
+            [0, 1, 1, 1, 0],
+            [1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 1],
+            [1, 0, 0, 0, 1],
+        ];
+        for y in 0..5 {
+            for x in 0..5 {
+                if pattern[y][x] > 0 {
+                    frame.set(x, y);
+                }
+            }
+        }
+        display.display(frame, Duration::from_millis(500)).await;
+    }
+
+    // Show "G"
+    {
+        let mut frame = Frame::<5, 5>::empty();
+        let pattern = [
+            [0, 1, 1, 1, 0],
+            [1, 0, 0, 0, 0],
+            [1, 0, 1, 1, 1],
+            [1, 0, 0, 0, 1],
+            [0, 1, 1, 1, 0],
+        ];
+        for y in 0..5 {
+            for x in 0..5 {
+                if pattern[y][x] > 0 {
+                    frame.set(x, y);
+                }
+            }
+        }
+        display.display(frame, Duration::from_millis(500)).await;
+    }
+
+    // Show "I"
+    {
+        let mut frame = Frame::<5, 5>::empty();
+        let pattern = [
+            [1, 1, 1, 1, 1],
+            [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+            [1, 1, 1, 1, 1],
+        ];
+        for y in 0..5 {
+            for x in 0..5 {
+                if pattern[y][x] > 0 {
+                    frame.set(x, y);
+                }
+            }
+        }
+        display.display(frame, Duration::from_millis(500)).await;
+    }
+
+    // Clear display
+    let clear_frame = Frame::<5, 5>::empty();
+    display.display(clear_frame, Duration::from_millis(30)).await;
+    
     // Initialize BLE using microbit-bsp's built-in TrouBLE support
     // When trouble feature is enabled, board has a 'ble' field
     let (sdc, mpsl) = board
@@ -94,16 +202,6 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let mut sensors = Sensors::new();
     let mut gpio = GpioController::new();
     let mut bluetooth = BluetoothService::new(BLUETOOTH_NAME);
-    
-    // Startup sequence: Show FEAGI letters
-    use embassy_time::{Duration, Timer};
-    
-    // Skip startup sequence for now - focus on BLE integration
-    // Display will be updated in main loop based on neuron firing
-    // TODO: Fix display API once we understand Frame/Bitmap generics
-    
-    // Skip startup sequence for now - focus on BLE integration
-    // Display will be updated in main loop based on neuron firing
     
     // Main control loop (async)
     let mut loop_count: u32 = 0;
@@ -172,19 +270,18 @@ async fn main(_spawner: embassy_executor::Spawner) {
             }
         }
         
-        // Update LED display - skip for now until we fix Frame API
-        // TODO: Fix Frame::new API usage
-        // if OUTPUT_LED_MATRIX_ENABLED {
-        //     let mut bitmap = Bitmap::new(5, 5);
-        //     for y in 0..5 {
-        //         for x in 0..5 {
-        //             if display_buffer[y][x] > 127 {
-        //                 bitmap.set(x, y);
-        //             }
-        //         }
-        //     }
-        //     display.display(&Frame::new([bitmap]), Duration::from_millis(30)).await;
-        // }
+        // Update LED display
+        if OUTPUT_LED_MATRIX_ENABLED {
+            let mut frame = Frame::<5, 5>::empty();
+            for y in 0..5 {
+                for x in 0..5 {
+                    if display_buffer[y][x] > 127 {
+                        frame.set(x, y);
+                    }
+                }
+            }
+            display.display(frame, Duration::from_millis(30)).await;
+        }
         
         // Async delay (10ms)
         Timer::after(Duration::from_millis(10)).await;

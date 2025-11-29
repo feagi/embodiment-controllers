@@ -34,6 +34,10 @@ cargo build --release --target "$TARGET"
 # Convert to .hex format
 echo "🔧 Converting to .hex format..."
 BINARY_NAME="feagi-microbit-controller"
+# Use objcopy to convert ELF to Intel HEX format
+# -O ihex: Output in Intel HEX format (required for micro:bit mass storage flashing)
+# --set-section-flags .text=alloc,code: Ensure text section is marked correctly
+rust-objcopy --release --target "$TARGET" --bin "$BINARY_NAME" -- -O ihex --set-section-flags .text=alloc,code "target/$TARGET/release/$OUTPUT_NAME" || \
 cargo objcopy --release --target "$TARGET" --bin "$BINARY_NAME" -- -O ihex "target/$TARGET/release/$OUTPUT_NAME"
 
 # Get file size
