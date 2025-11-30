@@ -102,3 +102,4 @@ This compatibility layer is **100% reusable** for:
 - Not micro:bit-specific
 - Works for nRF52833, nRF52840, nRF5340, etc.
 
+

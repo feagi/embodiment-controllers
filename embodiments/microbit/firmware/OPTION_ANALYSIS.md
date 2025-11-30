@@ -137,3 +137,4 @@ let board = Board::default();
 
 The refactoring effort is minimal compared to the complexity of manually coordinating peripherals, and the result will be cleaner and more maintainable.
 
+

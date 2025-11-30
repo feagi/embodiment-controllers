@@ -1,8 +1,18 @@
 # Quick Start Guide - FEAGI micro:bit Controller
 
-## Status: Phase 2 Foundation Complete ✅
+## Status: BLE Stack Integrated (One-Way Communication) ✅
 
-The project structure is ready! Now we need to implement the actual drivers and BLE service.
+**⚠️ IMPORTANT LIMITATION:** BLE notifications (sending data from micro:bit) are not functional.  
+See `BLE_LIMITATIONS.md` for details. One-way communication (client → micro:bit) works.
+
+**What Works:**
+- ✅ BLE advertising and connection
+- ✅ Receiving neuron firing data → LED matrix display
+- ✅ Receiving GPIO/LED commands
+
+**What Doesn't Work:**
+- ❌ Sending sensor data to client (notifications blocked by API)
+- ❌ Bidirectional FEAGI communication (sensorimotor loop incomplete)
 
 ---
 

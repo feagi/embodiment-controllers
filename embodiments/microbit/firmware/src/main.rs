@@ -32,11 +32,24 @@ fn panic() -> ! {
     }
 }
 use microbit_bsp::Microbit;
-use microbit_bsp::ble::{MultiprotocolServiceLayer, SoftdeviceController};
-// BLE will be implemented using TrouBLE via microbit-bsp (pure Rust, MIT license)
 
+// BLE-specific imports (only when transport-ble is enabled)
+#[cfg(feature = "transport-ble")]
+use microbit_bsp::ble::{MultiprotocolServiceLayer, SoftdeviceController};
+
+// BLE-specific modules (only compiled when transport-ble is enabled)
+#[cfg(feature = "transport-ble")]
 mod ble_compat;
+#[cfg(feature = "transport-ble")]
 mod ble_stack;
+
+// USB-specific modules (only compiled when transport-usb is enabled)
+#[cfg(feature = "transport-usb")]
+mod usb_vbus;
+#[cfg(feature = "transport-usb")]
+mod protocol;
+
+// Common modules (always compiled)
 mod bluetooth;
 mod gpio_controller;
 mod sensors;
@@ -58,7 +71,10 @@ static mut BLE_RX_BUFFER: Option<heapless::Vec<u8, 256>> = None;
 // Buffer for sensor data (Main loop -> BLE task)  
 static mut BLE_TX_BUFFER: Option<heapless::Vec<u8, 256>> = None;
 
-// Use embassy-executor main macro
+// ============================================================================
+// BLE VARIANT - Main function for Bluetooth Low Energy transport
+// ============================================================================
+#[cfg(feature = "transport-ble")]
 #[embassy_executor::main]
 async fn main(_spawner: embassy_executor::Spawner) {
     // Initialize micro:bit board using microbit-bsp
@@ -289,13 +305,158 @@ async fn main(_spawner: embassy_executor::Spawner) {
     }
 }
 
+// ============================================================================
+// USB VARIANT - Main function for USB CDC Serial transport
+// ============================================================================
+#[cfg(feature = "transport-usb")]
+#[embassy_executor::main]
+async fn main(spawner: embassy_executor::Spawner) {
+    use embassy_nrf::{bind_interrupts, usb, peripherals};
+    use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+    use embassy_usb::{Builder, Config};
+    use embassy_time::{Duration, Timer};
+    use crate::protocol::{FeagiProtocol, Command};
+    use crate::usb_vbus::AlwaysOnVbus;
+    
+    // Initialize embassy-nrf FIRST for USB (can't use microbit-bsp at same time)
+    let mut nrf_config = embassy_nrf::config::Config::default();
+    nrf_config.hfclk_source = embassy_nrf::config::HfclkSource::Internal;
+    nrf_config.lfclk_source = embassy_nrf::config::LfclkSource::InternalRC;
+    nrf_config.gpiote_interrupt_priority = embassy_nrf::interrupt::Priority::P7;
+    nrf_config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P7;
+    let p = embassy_nrf::init(nrf_config);
+    
+    // USB interrupt bindings
+    bind_interrupts!(struct Irqs {
+        USBD => usb::InterruptHandler<peripherals::USBD>;
+    });
+    
+    // Create USB driver with always-on VBUS detect
+    static VBUS_DETECT: AlwaysOnVbus = AlwaysOnVbus::new();
+    let driver = usb::Driver::new(p.USBD, Irqs, &VBUS_DETECT);
+    
+    // Static storage for USB descriptors and state
+    static CONFIG_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
+    static BOS_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
+    static CONTROL_BUF: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
+    static STATE: static_cell::StaticCell<State> = static_cell::StaticCell::new();
+    
+    let config_desc = CONFIG_DESC.init([0; 256]);
+    let bos_desc = BOS_DESC.init([0; 256]);
+    let control_buf = CONTROL_BUF.init([0; 128]);
+    let state = STATE.init(State::new());
+    
+    // USB device configuration
+    let mut config = Config::new(0x16c0, 0x27dd); // Generic VID/PID
+    config.manufacturer = Some("Neuraville");
+    config.product = Some("FEAGI-microbit");
+    config.serial_number = Some("12345678");
+    config.max_power = 100;
+    config.max_packet_size_0 = 64;
+    
+    // Build USB device
+    let mut builder = Builder::new(driver, config, config_desc, bos_desc, &mut [], control_buf);
+    
+    // Create CDC ACM class
+    let cdc_class = CdcAcmClass::new(&mut builder, state, 64);
+    
+    // Store CDC class in static for access from other tasks
+    static CDC: static_cell::StaticCell<embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, Option<CdcAcmClass<'static, embassy_nrf::usb::Driver<'static, embassy_nrf::peripherals::USBD, &'static AlwaysOnVbus>>>>> = static_cell::StaticCell::new();
+    let cdc = CDC.init(embassy_sync::mutex::Mutex::new(Some(cdc_class)));
+    
+    // Build and spawn USB device task
+    let usb_device = builder.build();
+    spawner.must_spawn(usb_device_task(usb_device));
+    
+    // Initialize FEAGI protocol
+    let mut protocol = FeagiProtocol::new();
+    
+    // Wait for USB connection (CDC ACM DTR signal)
+    loop {
+        let mut cdc_lock = cdc.lock().await;
+        if let Some(ref mut cdc_instance) = *cdc_lock {
+            cdc_instance.wait_connection().await;
+            break;
+        }
+    }
+    
+    // NOTE: LED display temporarily disabled in USB mode
+    // Will implement raw GPIO control in future update
+    
+    // Main loop: read from USB, process commands (no display yet)
+    loop {
+        // Read from USB CDC
+        let mut buf = [0u8; 64];
+        let mut cdc_lock = cdc.lock().await;
+        if let Some(ref mut cdc_instance) = *cdc_lock {
+            match cdc_instance.read_packet(&mut buf).await {
+                Ok(len) if len > 0 => {
+                    drop(cdc_lock);
+                    protocol.process_received_data(&buf[..len]);
+                }
+                _ => {
+                    drop(cdc_lock);
+                }
+            }
+        } else {
+            drop(cdc_lock);
+        }
+        
+        // Process commands from protocol (data is received but not displayed)
+        while let Some(cmd) = protocol.receive_command() {
+            match cmd {
+                Command::NeuronFiring { coordinates: _ } => {
+                    // TODO: Display via raw GPIO
+                }
+                Command::SetLedMatrix { data: _ } => {
+                    // TODO: Display via raw GPIO
+                }
+                Command::SetGpio { pin: _, value: _ } => {
+                    // TODO: GPIO control
+                }
+                Command::SetPwm { pin: _, duty: _ } => {
+                    // TODO: PWM control
+                }
+                Command::GetCapabilities => {
+                    // TODO: Send capabilities JSON
+                }
+            }
+        }
+        
+        // Small delay
+        Timer::after(Duration::from_millis(10)).await;
+    }
+}
+
+// USB device task (runs USB stack)
+#[cfg(feature = "transport-usb")]
+#[embassy_executor::task]
+async fn usb_device_task(
+    mut usb_device: embassy_usb::UsbDevice<
+        'static,
+        embassy_nrf::usb::Driver<
+            'static,
+            embassy_nrf::peripherals::USBD,
+            &'static crate::usb_vbus::AlwaysOnVbus,
+        >,
+    >,
+) -> ! {
+    usb_device.run().await
+}
+
+// ============================================================================
+// BLE TASKS - Only compiled when transport-ble is enabled
+// ============================================================================
+
 // MPSL task to run the Multiprotocol Service Layer
+#[cfg(feature = "transport-ble")]
 #[embassy_executor::task]
 async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
 }
 
 // BLE task to handle BLE events
+#[cfg(feature = "transport-ble")]
 #[embassy_executor::task]
 async fn ble_task(mut ble_stack: ble_stack::BleStack<'static>) {
     loop {

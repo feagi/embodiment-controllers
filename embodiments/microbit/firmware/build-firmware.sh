@@ -1,54 +1,53 @@
 #!/bin/bash
-# Build FEAGI micro:bit firmware and generate .hex file
+# Build FEAGI micro:bit firmware with selectable transport
 
 set -e
 
-VERSION="${1:-v2}"  # Default to V2
-CONFIG_FILE="${2:-}"  # Optional config.json from Desktop app
+VERSION="${1:-v2}"
+CONFIG_FILE="${2:-}"
+TRANSPORT="${3:-ble}"  # NEW: ble or usb
 
-echo "🔨 Building FEAGI micro:bit controller for $VERSION..."
+echo "🔨 Building FEAGI micro:bit controller for $VERSION (transport: $TRANSPORT)..."
 
-# Determine target (V2 only for now)
+# Determine feature flags
+if [ "$TRANSPORT" = "usb" ]; then
+    FEATURES="--no-default-features --features transport-usb"
+    OUTPUT_NAME="feagi-microbit-usb-v2.hex"
+else
+    FEATURES="--features transport-ble"
+    OUTPUT_NAME="feagi-microbit-ble-v2.hex"
+fi
+
 TARGET="thumbv7em-none-eabihf"
-OUTPUT_NAME="feagi-microbit-v2.hex"
 
-# If config file provided, copy it (build.rs can read it)
+# Handle config file
 if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     echo "📝 Using custom configuration: $CONFIG_FILE"
-    # Get absolute paths to compare
     CONFIG_ABS=$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")
     TARGET_ABS=$(pwd)/config.json
     
-    # Only copy if different files
     if [ "$CONFIG_ABS" != "$TARGET_ABS" ]; then
         cp "$CONFIG_FILE" config.json
-    else
-        echo "   Config already in place, skipping copy"
     fi
 fi
 
-# Build release firmware
-echo "⚙️  Compiling Rust firmware (target: $TARGET)..."
-cargo build --release --target "$TARGET"
+# Build firmware
+echo "⚙️  Compiling Rust firmware (target: $TARGET, features: $FEATURES)..."
+cargo build --release $FEATURES --target "$TARGET"
 
-# Convert to .hex format
+# Convert to .hex
 echo "🔧 Converting to .hex format..."
 BINARY_NAME="feagi-microbit-controller"
-# Use objcopy to convert ELF to Intel HEX format
-# -O ihex: Output in Intel HEX format (required for micro:bit mass storage flashing)
-# --set-section-flags .text=alloc,code: Ensure text section is marked correctly
 rust-objcopy --release --target "$TARGET" --bin "$BINARY_NAME" -- -O ihex --set-section-flags .text=alloc,code "target/$TARGET/release/$OUTPUT_NAME" || \
 cargo objcopy --release --target "$TARGET" --bin "$BINARY_NAME" -- -O ihex "target/$TARGET/release/$OUTPUT_NAME"
 
-# Get file size
 SIZE=$(ls -lh "target/$TARGET/release/$OUTPUT_NAME" | awk '{print $5}')
 echo "✅ Firmware built successfully: target/$TARGET/release/$OUTPUT_NAME ($SIZE)"
 
 # Copy to easy location
 cp "target/$TARGET/release/$OUTPUT_NAME" ./firmware.hex
-echo "📦 Firmware ready: ./firmware.hex"
+echo "📦 Firmware ready: ./firmware.hex (transport: $TRANSPORT)"
 echo ""
 echo "To flash:"
 echo "  cp firmware.hex /Volumes/MICROBIT/"
 echo ""
-

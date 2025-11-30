@@ -68,3 +68,4 @@ The binary blob is only for the low-level radio controller, not the protocol sta
 
 The compatibility issue we hit (`ControllerCmdSync<LeReadBufferSize>`) is a trait implementation gap in `nrf-sdc`, not a fundamental architecture problem.
 
+

@@ -107,3 +107,4 @@ It uses:
 
 The "UART" in "Nordic UART Service" is just a name - it's a BLE service that provides UART-like communication over Bluetooth, not physical UART hardware.
 
+

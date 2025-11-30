@@ -8,40 +8,38 @@ description = "FEAGI controller firmware for BBC micro:bit devices"
 repository = "https://github.com/feagi/FEAGI-2.0"
 
 [dependencies]
-cortex-m = "0.7"
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 panic-halt = "0.2"
 embedded-hal = "1.0"
+defmt-rtt = "0.4"  # defmt transport (RTT logging)
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde-json-core = "0.5"
 heapless = "0.8"
 static_cell = "1.3"
 
 # micro:bit V2 dependencies
-# Using microbit-bsp with trouble feature for BLE support
-microbit-bsp = { version = "0.4", features = ["trouble"] }
+# NO features by default - features will be enabled conditionally via transport-ble or transport-usb
+microbit-bsp = { version = "0.4", default-features = false }
 
-# Bluetooth Low Energy - Using TrouBLE (pure Rust, MIT/Apache-2.0 license)
-# NOTE: We abandoned nrf-softdevice due to license issues (proprietary SoftDevice binary)
-# TrouBLE is a pure Rust BLE Host implementation from embassy-rs
-# Upgraded to embassy-nrf 0.8.x for TrouBLE compatibility
-# Note: microbit-bsp 0.4.0 requires embassy-nrf 0.4.x
-# We'll let microbit-bsp manage embassy-nrf version
-# But we need embassy-executor and embassy-time for the main macro and timers
+# Embassy async runtime (always needed for both transports)
 embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
 embassy-time = { version = "0.4", features = ["tick-hz-32_768"] }
-# embassy-sync version must match trouble-host@0.1.0's requirement (0.6.x)
-embassy-sync = { version = "0.6" }
-# TrouBLE for BLE (pure Rust, MIT/Apache-2.0 license)
-# Using 0.1.0 to match bt-hci@0.2 with nrf-sdc's bt-hci@0.3 (closer compatibility)
-trouble-host = { version = "0.1", features = ["peripheral", "gatt"] }
-# Dependencies for compatibility layer
-embedded-io = "0.6"  # Required by trouble_host::Controller trait
-bt-hci = "0.2"  # Used by trouble-host (explicit dependency)
-# Add bt-hci@0.3 as renamed dependency for type conversions
-bt-hci-v3 = { package = "bt-hci", version = "0.3" }
-nrf-sdc = "0.1"  # For Error type access
-defmt = "1.0"  # Required by embassy-executor/nrf-sdc
+defmt = "1.0"  # Required by embassy
+
+# Shared primitives (used by both BLE and USB)
+embassy-sync = { version = "0.6", optional = true }
+
+# BLE transport dependencies (optional, only when transport-ble is enabled)
+trouble-host = { version = "0.1", features = ["peripheral", "gatt"], optional = true }
+embedded-io = { version = "0.6", optional = true }
+bt-hci = { version = "0.2", optional = true }
+bt-hci-v3 = { package = "bt-hci", version = "0.3", optional = true }
+nrf-sdc = { version = "0.1", optional = true }
+
+# USB CDC transport dependencies (optional, only when transport-usb is enabled)
+embassy-nrf = { version = "0.4", features = ["nrf52833", "time-driver-rtc1", "gpiote", "unstable-pac"], optional = true }
+embassy-usb = { version = "0.4", features = ["defmt"], optional = true }
 
 # Sensor drivers (optional - for future I2C implementation)
 [dependencies.lsm303agr]
@@ -50,7 +48,27 @@ optional = true
 
 
 [features]
-default = []
+default = ["transport-ble"]
+
+# Transport selection (mutually exclusive)
+# transport-ble: Enables BLE via TrouBLE + enables trouble feature in microbit-bsp
+# transport-usb: Enables USB CDC + embassy-nrf for USB driver
+transport-ble = [
+    "microbit-bsp/trouble",  # Enable trouble feature in microbit-bsp
+    "microbit-bsp/defmt",    # Enable defmt logging
+    "embassy-sync",
+    "trouble-host",
+    "embedded-io",
+    "bt-hci",
+    "bt-hci-v3",
+    "nrf-sdc"
+]
+transport-usb = [
+    "microbit-bsp/defmt",    # Enable defmt logging
+    "embassy-sync",
+    "embassy-nrf",
+    "embassy-usb"
+]
 
 # Build profiles
 [profile.dev]

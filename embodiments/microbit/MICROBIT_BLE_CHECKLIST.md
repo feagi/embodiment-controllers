@@ -140,3 +140,4 @@
 - **LED Matrix:** Uses `omis` (Miscellaneous Motor) cortical area, 5x5x1 dimensions
 - **GPIO:** Maps to standard FEAGI motor cortical areas
 
+

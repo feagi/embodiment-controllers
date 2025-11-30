@@ -219,3 +219,4 @@ match event {
 - [nrf-sdc Documentation](https://github.com/alexmoon/nrf-sdc)
 - [Nordic UART Service](https://infocenter.nordicsemi.com/topic/sdk_nrf5_v17.1.0/ble_sdk_app_nus_eval.html)
 
+

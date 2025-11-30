@@ -54,3 +54,4 @@
 - TrouBLE documentation: https://github.com/embassy-rs/trouble
 - Nordic UART Service: Standard BLE service for serial communication
 
+

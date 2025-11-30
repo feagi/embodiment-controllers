@@ -38,3 +38,4 @@
 - Commands with lifetime parameters need manual implementation
 - Binary format is identical between bt-hci versions - safe to use transmute for FixedSizeValue types
 
+

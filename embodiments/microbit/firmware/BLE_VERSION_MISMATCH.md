@@ -44,3 +44,4 @@ In the meantime, we have a working placeholder that compiles and can be extended
 2. Check if `microbit-bsp` has updates that resolve this
 3. Monitor the `nrf-sdc` and `trouble-host` repositories for compatibility updates
 
+
