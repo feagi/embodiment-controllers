@@ -1,0 +1,11 @@
+{
+  "mode": "controller",
+  "model": "esp32-devkit-v1",
+  "transport": {
+    "type": "serial",
+    "config": {}
+  },
+  "burst_frequency": 100,
+  "gpio": []
+}
+

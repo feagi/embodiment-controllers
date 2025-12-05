@@ -1,0 +1,49 @@
+[package]
+name = "feagi-esp32-standalone"
+version = "0.1.0"
+edition = "2021"
+authors = ["FEAGI Team <team@neuraville.com>"]
+license = "MIT"
+description = "FEAGI standalone firmware for ESP32 - neural network runs on-device"
+
+[[bin]]
+name = "feagi-esp32-standalone"
+path = "src/main.rs"
+
+[dependencies]
+# FEAGI Embedded runtime
+# Note: Paths will be resolved relative to project root when built via FEAGI Desktop
+feagi-embedded = { path = "../../../../../../feagi-embedded", features = ["esp32"] }
+feagi-types = { path = "../../../../../../feagi-core/crates/feagi-types" }
+feagi-runtime-embedded = { path = "../../../../../../feagi-core/crates/feagi-runtime-embedded" }
+feagi-synapse = { path = "../../../../../../feagi-core/crates/feagi-synapse" }
+
+# ESP32 HAL
+esp-idf-svc = { version = ">=0.49", default-features = false, features = ["binstart"] }
+
+# Utilities
+anyhow = "1.0"
+heapless = "0.8"
+
+[build-dependencies]
+embuild = { version = "0.32", features = ["espidf"] }
+
+[profile.release]
+opt-level = "z"      # Optimize aggressively for size
+lto = true           # Link-time optimization
+codegen-units = 1    # Better optimization
+strip = true         # Remove debug symbols
+
+[profile.dev]
+opt-level = 1        # Some optimization for reasonable performance
+debug = true
+
+# ESP32 configuration
+[package.metadata.esp-idf-sys]
+esp_idf_tools_install_dir = "global"
+esp_idf_version = "v5.1"
+
+[package.metadata.esp-idf]
+project_name = "feagi-esp32-standalone"
+version = "2.0.0"
+

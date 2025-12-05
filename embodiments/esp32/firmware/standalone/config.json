@@ -1,0 +1,7 @@
+{
+  "mode": "standalone",
+  "model": "esp32-devkit-v1",
+  "burst_frequency": 100,
+  "gpio": []
+}
+
