@@ -39,7 +39,7 @@ The Neurorobotics Studio provides a user-friendly web interface for quick setup 
 #### Getting Started with Neurorobotics Studio
 
 
-1. Visit [Neurorobotics Studio](https://neurorobotics.studio/lab)
+1. Visit [Neurorobotics Studio](https://brainsforrobots.com/lab)
 
 2. Create a New Experiment:
    - Click "Create"

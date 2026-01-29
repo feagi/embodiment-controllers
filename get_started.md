@@ -13,7 +13,7 @@ So, here is the template: https://github.com/feagi/controllers/blob/staging/embo
 
 3) You will also need a `networking.json` file. We don't have a generator for that yet, but you can simply copy and paste it from here: https://github.com/feagi/controllers/blob/staging/embodiments/ufactory/lite_6/networking.json
 
-4) There are various ways to connect a controller with FEAGI. You can test it based on your own preferences. If you want to use a website like https://neurorobotics.studio/, you can get a `magic_link` from an experiment inside NRS. If you prefer to run Docker, you can do that here: https://github.com/feagi/feagi/tree/staging/docker
+4) There are various ways to connect a controller with FEAGI. You can test it based on your own preferences. If you want to use a website like https://brainsforrobots.com/, you can get a `magic_link` from an experiment inside NRS. If you prefer to run Docker, you can do that here: https://github.com/feagi/feagi/tree/staging/docker
 
 To use `playground.yml` for Docker, run the following commands:
 1) `docker compose -f playground.yml pull` # to fetch the latest images

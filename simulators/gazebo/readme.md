@@ -11,7 +11,7 @@ There are three different folders at the moment: feagi_gazebo, gazebo_parser, an
 Currently, there is nothing in it, but it uses student work from their capstone project, which is gazebo_parser. This is mainly used for the cloud to utilize and pass the SDF information.  
 
 ## gazebo_parser  
-This design allows you to parse the SDF file into capabilities.json. The controller configurator is currently using this parser: https://neurorobotics.studio/configurator  
+This design allows you to parse the SDF file into capabilities.json. The controller configurator is currently using this parser: https://brainsforrobots.com/configurator  
 
 ## generic_controller inside the model  
 This is our best solution approach and the most dynamic design, where FEAGI can easily pick it up after the gazebo parser. It uses the `subprocess` library to communicate with FEAGI efficiently. It is designed to work with any SDF. This was created to work with students from the University of Pittsburgh. It is compatible with Mac, Windows (WSL), and Linux. This design is very accessible by anyone. 
