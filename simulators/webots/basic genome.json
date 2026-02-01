@@ -1181,7 +1181,7 @@
          "class": "core",
          "morphology_name": "projector"
       },
-      "memory": {
+      "episodic_memory": {
          "parameters": {},
          "type": "functions",
          "class": "core"
