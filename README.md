@@ -4,7 +4,7 @@
 
 Controllers for connecting embodiments (robots, simulators, sensors, IoT devices) to [FEAGI](https://github.com/feagi/feagi)'s neural engine. This repository contains controllers for common platforms, and you can create your own.
 
-**Prerequisite:** FEAGI and Brain Visualizer must be started **before** launching any controller. See [FEAGI Installation]([https://github.com/feagi/feagi/blob/main/DEPLOY.md](https://github.com/feagi/feagi/blob/staging/DEPLOY.md) for setup.
+**Prerequisite:** FEAGI and Brain Visualizer must be started **before** launching any controller. See [FEAGI Installation]([https://github.com/feagi/feagi/blob/main/DEPLOY.md](https://github.com/feagi/feagi/blob/staging/DEPLOY.md)) for setup.
 
 ---
 
