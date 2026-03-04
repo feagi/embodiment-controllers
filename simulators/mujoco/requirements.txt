@@ -1,0 +1,9 @@
+# FEAGI Python SDK (aligned with feagi-python-sdk)
+feagi-core>=2.1.30
+
+# FEAGI Rust libs (aligned with feagi-core)
+feagi-rust-py-libs>=0.0.92
+
+# MuJoCo physics simulator
+mujoco==3.2.3
+numpy==1.26.4
