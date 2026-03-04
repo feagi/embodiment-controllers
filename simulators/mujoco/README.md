@@ -2,6 +2,29 @@
 
 Generic MuJoCo controller supporting any MuJoCo XML model via FEAGI Python SDK.
 
+## Prerequisites: Start FEAGI and Brain Visualizer First
+
+**Important:** You must start FEAGI and Brain Visualizer (BV) **before** launching the MuJoCo controller. The controller connects to a running FEAGI instance; it will fail or fall back to standalone mode if FEAGI is not available.
+
+### Starting FEAGI
+
+1. Install FEAGI (see [FEAGI Installation Guide](../../../feagi-python-sdk/DEPLOY.md) for detailed setup).
+2. Start the FEAGI runtime:
+
+   ```bash
+   feagi start
+   ```
+
+3. Start Brain Visualizer (optional but recommended for visualization):
+
+   ```bash
+   feagi bv start
+   ```
+
+4. Ensure FEAGI has a genome loaded (via API, `--genome` at startup, or use `--load-genome` when running the controller).
+
+For full installation and configuration details, see the [FEAGI Installation Guide](../../../feagi-python-sdk/DEPLOY.md).
+
 ## Requirements
 
 - Python 3.10, 3.11, or 3.12 (not 3.13+; mujoco 3.2.3 has no wheels for newer Python)
@@ -22,7 +45,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-Start FEAGI, then run the controller. All network parameters are required (no defaults). Obtain values from your FEAGI network configuration.
+With FEAGI and Brain Visualizer already running (see [Prerequisites](#prerequisites-start-feagi-and-brain-visualizer-first)), run the controller. All network parameters are required (no defaults). Obtain values from your FEAGI network configuration.
 
 ### Platform-specific interpreter
 
