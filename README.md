@@ -2,7 +2,9 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/feagi/embodiment-controllers)](https://github.com/feagi/embodiment-controllers/releases) [![Discord](https://img.shields.io/discord/1242546683791933480)](https://discord.gg/PTVC8fyGN8) [![GitHub License](https://img.shields.io/github/license/feagi/embodiment-controllers)](https://www.apache.org/licenses/LICENSE-2.0.txt)
 
-Controllers for connecting embodiments (robots, simulators, sensors, IoT devices) to [FEAGI](https://github.com/feagi/feagi)'s neural engine. This repository contains controllers for common platforms, and you can create your own!
+Controllers for connecting embodiments (robots, simulators, sensors, IoT devices) to [FEAGI](https://github.com/feagi/feagi)'s neural engine. This repository contains controllers for common platforms, and you can create your own.
+
+**Prerequisite:** FEAGI and Brain Visualizer must be started **before** launching any controller. See [FEAGI Installation](https://github.com/feagi/feagi-python-sdk/blob/main/DEPLOY.md) for setup.
 
 ---
 
@@ -20,23 +22,23 @@ The controller is the bridge. The agent is the result when everything works toge
 
 This repository is organized into two main categories:
 
-### 📱 Physical Embodiments (`/embodiments`)
+### Physical Embodiments (`/embodiments`)
 
 Real-world hardware platforms organized by manufacturer:
 
-- **Robots**: Petoi (Bittle, Nybble), Elephant Robotics (MyCobot), Cozmo, Freenove, and more
-- **Microcontrollers**: Arduino, ESP32, Raspberry Pi
-- **STEM Platforms**: Educational robotics kits
-- **BCI Devices**: Brain-computer interfaces (Interaxon)
-- **Sensors**: LiDAR, cameras, IMUs
-- **IoT Devices**: Various connected devices
+- **Robots**: Petoi (Bittle), Elephant Robotics (MyCobot), Digital Dream Labs (Cozmo), Freenove, uFactory (Lite 6), Neuromaker (Hand 2)
+- **Microcontrollers**: Arduino, ESP32, Raspberry Pi, Micro:bit
+- **BCI**: Interaxon
+- **Sensors**: Hokuyo LiDAR
+- **Drones**: Ryze (Tello)
+- **Other**: Elecfreaks (Cutebot), Neuraville (audio, video, webcam), Keystudio
 
-### 🎮 Simulators (`/simulators`)
+### Simulators (`/simulators`)
 
 Virtual environments for development and testing:
 
-- **MuJoCo**: Physics simulation with humanoid models
-- **Gazebo**: Robotics simulator with various robot models
+- **MuJoCo**: Physics simulation (humanoid, ant, reacher). Generic controller at `simulators/mujoco/`.
+- **Gazebo**: Robotics simulator
 - **Webots**: Robot simulator
 - **Blender**: 3D environment integration
 
@@ -46,41 +48,44 @@ Virtual environments for development and testing:
 
 ### Using an Existing Controller
 
-1. **Clone the repository**:
+1. **Start FEAGI and Brain Visualizer first** (required):
+   ```bash
+   feagi start
+   feagi bv start
+   ```
+   See [FEAGI Installation Guide](https://github.com/feagi/feagi-python-sdk/blob/main/DEPLOY.md) if not yet installed.
+
+2. **Clone the repository**:
    ```bash
    git clone https://github.com/feagi/embodiment-controllers.git
    cd embodiment-controllers
    ```
+   Or, if using the FEAGI 2.0 monorepo: `cd embodiment-controllers` from the project root.
 
-2. **Navigate to your controller**:
+3. **Navigate to your controller**:
    ```bash
    cd embodiments/petoi/bittle
-   # or
-   cd simulators/mujoco/humanoid
+   # or (MuJoCo: controller at simulators/mujoco root)
+   cd simulators/mujoco
    ```
 
-3. **Set up Python environment**:
+4. **Set up Python environment**:
    ```bash
    python3 -m venv venv
-   source venv/bin/activate  # Linux/Mac
-   # or
-   venv\Scripts\activate     # Windows
+   source venv/bin/activate  # Linux/macOS
+   # Windows: venv\Scripts\activate
    pip install -r requirements.txt
    ```
 
-4. **Run the controller**:
+5. **Run the controller**:
    ```bash
-   # Local FEAGI
+   # Local FEAGI (default 127.0.0.1:8000)
    python controller.py
    
-   # Remote FEAGI (Docker)
-   python controller.py --ip 192.168.1.100 --port 30000
-   
-   # Neurorobotics Studio (Cloud)
-   python controller.py --magic_link "your_magic_link_here"
+   # Remote FEAGI
+   python controller.py --ip 192.168.1.100 --port 8000
    ```
-
-For detailed instructions, see each controller's `README.md`.
+   MuJoCo and some controllers require additional arguments (e.g. `--feagi-zmq-motor-port`, `--model_xml`). See each controller's `README.md` for details.
 
 ---
 
@@ -127,24 +132,27 @@ The marketplace handles:
 embodiment-controllers/
 ├── embodiments/
 │   ├── arduino/
-│   │   ├── uno/
-│   │   └── mega/
 │   ├── petoi/
-│   │   └── bittle/
+│   │   ├── bittle/
+│   │   ├── bluetooth/
+│   │   └── pyserial/
 │   ├── elephant_robotics/
-│   │   └── mycobot_280/
+│   ├── esp32/
+│   ├── microbit/
+│   ├── digital_dream_labs/
+│   │   └── cozmo_1.0/
+│   ├── template/
 │   └── ...
 ├── simulators/
-│   ├── mujoco/
-│   │   └── humanoid/
+│   ├── mujoco/          # Generic controller (ant, humanoid, reacher models)
 │   ├── gazebo/
-│   │   └── turtlebot/
-│   └── ...
+│   ├── webots/
+│   └── blender/
 ├── docs/
 │   └── create_controller.md
-├── CONTROLLER_STANDARD.md    ← Technical requirements
-├── connectivity.md            ← Connection guide
-└── README.md                  ← You are here
+├── CONTROLLER_STANDARD.md    # Technical requirements
+├── connectivity.md           # Connection guide
+└── README.md                 # You are here
 ```
 
 ---

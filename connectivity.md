@@ -1,7 +1,10 @@
 # Creation of Custom Controller
+
 The controller enables communication between FEAGI and your robot. It is designed to allow FEAGI to control your embodiment (such as simulations, models, or physical robots).
 
-If you want to connect FEAGI with your own robot, this is the right place for you. There are three different ways your controller can be used for: the Neurorobotics Studio website, Docker, or locally. The Neurorobotics Studio is a website that requires no setup. We also offer Docker and local options. Docker allows you to open a container without additional setup work. The local option lets you build source code directly and access FEAGI directly.
+**Prerequisite:** Start FEAGI and Brain Visualizer before launching any controller. See [FEAGI Installation](https://github.com/feagi/feagi-python-sdk/blob/main/DEPLOY.md).
+
+If you want to connect FEAGI with your own robot, this is the right place for you. There are three different ways your controller can be used: the Neurorobotics Studio website, Docker, or locally. The Neurorobotics Studio is a website that requires no setup. We also offer Docker and local options. Docker allows you to open a container without additional setup work. The local option lets you build source code directly and access FEAGI directly.
 
 # Environments
 
@@ -59,14 +62,14 @@ There are three environments where you can connect to Neurorobotics Studio (NRS)
 
 ### Setting Up Docker
 
-1. Clone the repository:  
+1. Clone the FEAGI repository (or use feagi-rs for FEAGI 2.0):  
    ```
    git clone https://github.com/feagi/feagi.git
    ```
 
 2. Navigate to the Docker directory:  
    ```
-   cd ~/feagi/docker
+   cd feagi/docker
    ```
 
 3. Pull the required Docker images:  

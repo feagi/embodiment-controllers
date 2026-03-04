@@ -43,9 +43,9 @@ embodiment-controllers/
 
 **Examples**:
 - `embodiments/petoi/bittle/`
-- `embodiments/elephant_robotics/mycobot_280/`
-- `simulators/mujoco/humanoid/`
-- `simulators/gazebo/turtlebot/`
+- `embodiments/elephant_robotics/feagi_connector_mycobot/`
+- `simulators/mujoco/` (generic controller; models in humanoid/, ant/, reacher/)
+- `simulators/gazebo/`
 
 ---
 
@@ -254,7 +254,7 @@ Brief description of the embodiment.
 1. Clone repository: `git clone ...`
 2. Navigate to controller: `cd embodiment-controllers/embodiments/.../...`
 3. Create virtual environment: `python3 -m venv venv`
-4. Activate: `source venv/bin/activate` (Linux/Mac) or `venv\Scripts\activate` (Windows)
+4. Activate: `source venv/bin/activate` (Linux/macOS) or `venv\Scripts\activate` (Windows)
 5. Install dependencies: `pip install -r requirements.txt`
 
 ### Connection Methods
@@ -350,7 +350,7 @@ python controller.py --usb_port /dev/ttyUSB0 --baudrate 115200
 
 ### 1. Test with Local FEAGI
 
-1. Start FEAGI Core locally (via Docker or source)
+1. Start FEAGI and Brain Visualizer first (`feagi start` and `feagi bv start`). See [FEAGI Installation](https://github.com/feagi/feagi-python-sdk/blob/main/DEPLOY.md).
 2. Run your controller: `python controller.py`
 3. Verify connection in FEAGI logs
 4. Test sensor data flow (check FEAGI brain visualizer)

@@ -2,6 +2,8 @@
 
 This document defines the technical requirements for all agents in the `feagi-agents` repository. Following this standard ensures your agent is compatible with FEAGI Core and can be discovered, installed, and used by the community.
 
+**Note:** For controllers in this repository (`embodiment-controllers`), see [CONTROLLER_STANDARD.md](CONTROLLER_STANDARD.md). The agent standard applies to the separate feagi-agents project.
+
 ---
 
 ## What is a FEAGI Agent?

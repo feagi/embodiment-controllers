@@ -8,6 +8,8 @@ The FEAGI Python SDK now includes **BluetoothRobot** - a simple base class that 
 
 ## Prerequisites
 
+Start FEAGI and Brain Visualizer before running the controller. See [FEAGI Installation](https://github.com/feagi/feagi-python-sdk/blob/main/DEPLOY.md).
+
 ```bash
 pip install 'feagi[bluetooth]'
 ```
@@ -72,11 +74,11 @@ FEAGI_PLATFORM=cloud python controller.py
 ```
 
 That's it! The SDK handles:
-- ✅ Bluetooth scanning & connection
-- ✅ Platform detection (desktop vs cloud)
-- ✅ FEAGI connection
-- ✅ Data loop
-- ✅ Error handling & reconnection
+- Bluetooth scanning and connection
+- Platform detection (desktop vs cloud)
+- FEAGI connection
+- Data loop
+- Error handling and reconnection
 
 ## Real Examples
 
@@ -205,11 +207,11 @@ BLUETOOTH_CONFIG = {
 
 | Platform | Method | Status |
 |----------|--------|--------|
-| **macOS** | Native (Core Bluetooth via bleak) | ✅ Tested |
-| **Windows** | Native (Windows BLE API via bleak) | ✅ Tested |
-| **Linux** | Native (BlueZ via bleak) | ✅ Tested |
-| **Raspberry Pi** | Native (BlueZ via bleak) | ✅ Tested |
-| **nrs-portal (Cloud)** | WebSocket relay from browser | ✅ Works |
+| **macOS** | Native (Core Bluetooth via bleak) | Tested |
+| **Windows** | Native (Windows BLE API via bleak) | Tested |
+| **Linux** | Native (BlueZ via bleak) | Tested |
+| **Raspberry Pi** | Native (BlueZ via bleak) | Tested |
+| **nrs-portal (Cloud)** | WebSocket relay from browser | Works |
 
 ## Troubleshooting
 
@@ -248,15 +250,15 @@ sudo apt-get install bluetooth bluez
 
 ## Next Steps
 
-1. ✅ Define your robot in `nrs-embodiments`
-2. ✅ Create controller using `BluetoothRobot`
-3. ✅ Test on desktop
-4. ✅ Deploy to feagi-desktop (auto-detected!)
-5. ✅ Works on nrs-portal too (with WebSocket relay)
+1. Define your robot in `nrs-embodiments`
+2. Create controller using `BluetoothRobot`
+3. Test on desktop
+4. Deploy to feagi-desktop (auto-detected)
+5. Works on nrs-portal too (with WebSocket relay)
 
 ## Support
 
-- SDK Issues: https://github.com/Neuraville/feagi-python-sdk/issues
+- SDK Issues: https://github.com/feagi/feagi-python-sdk/issues
 - Controller Examples: `embodiment-controllers/` repo
 - Documentation: https://docs.feagi.org
 
