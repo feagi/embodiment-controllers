@@ -9,7 +9,8 @@ import sys
 import time
 import argparse
 import logging
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -199,6 +200,363 @@ def parse_actuator_metadata_from_xml(xml_path: str) -> dict:
     return actuator_metadata
 
 
+@dataclass(frozen=True)
+class SensorRegistration:
+    sensor_name: str
+    sensor_tag: str
+    bundle_id: str
+    bundle_type: str
+    source_entity: str
+
+
+@dataclass(frozen=True)
+class RuntimeSensorChannel:
+    sensor_name: str
+    sensor_tag: str
+    start_index: int
+    length: int
+
+
+def parse_sensor_metadata_from_xml(xml_path: str) -> list[dict[str, str]]:
+    """Parse MuJoCo XML sensor definitions with resolved names and references."""
+    sensors: list[dict[str, str]] = []
+    try:
+        roots = _iter_mujoco_xml_roots(xml_path, visited=set())
+        for root in roots:
+            sensor_section = root.find("sensor")
+            if sensor_section is None:
+                continue
+            counter = 0
+            for sensor in sensor_section:
+                sensor_name = sensor.get("name")
+                if not sensor_name:
+                    sensor_name = f"sensor_{counter}"
+                    counter += 1
+                sensor_name = _sanitize_name(sensor_name)
+                source_entity = (
+                    sensor.get("joint")
+                    or sensor.get("site")
+                    or sensor.get("objname")
+                    or sensor_name
+                )
+                sensors.append(
+                    {
+                        "name": sensor_name,
+                        "tag": sensor.tag,
+                        "source_entity": _sanitize_name(source_entity),
+                    }
+                )
+    except Exception as exc:
+        logger.info("[WARN] Failed to parse sensor metadata from XML: %s", exc)
+    return sensors
+
+
+def _sensor_tag_to_feagi_unit(sensor_tag: str) -> Optional[str]:
+    normalized = sensor_tag.lower()
+    if normalized in ("rangefinder", "camprojection", "camdistance"):
+        return "Vision"
+    if normalized in ("framequat", "gyro"):
+        return "Gyroscope"
+    if normalized in ("distance", "proximity"):
+        return "Proximity"
+    if normalized in ("touch", "force", "accelerometer"):
+        return "Shock"
+    return None
+
+
+def _sensor_tag_to_signal_type(sensor_tag: str) -> str:
+    normalized = sensor_tag.lower()
+    if normalized in ("rangefinder", "camprojection", "camdistance"):
+        return "vision"
+    if normalized in ("framequat", "gyro"):
+        return "gyroscope"
+    if normalized in ("distance", "proximity"):
+        return "proximity"
+    if normalized in ("touch", "force", "accelerometer"):
+        return "shock"
+    return normalized
+
+
+def _sensor_bundle_type(sensor_tag: str) -> str:
+    normalized = sensor_tag.lower()
+    if normalized in ("rangefinder", "camprojection", "camdistance"):
+        return "camera_rig"
+    if normalized in ("framequat", "gyro", "accelerometer"):
+        return "imu"
+    if normalized in ("distance", "proximity", "touch", "force"):
+        return "sensor_array"
+    return "custom"
+
+
+def _build_sensor_registration_map(
+    model,
+    xml_path: str,
+) -> tuple[dict[str, list[SensorRegistration]], list[RuntimeSensorChannel]]:
+    """
+    Build deterministic sensory registration entries and runtime channel layout.
+
+    Uses XML metadata for semantic names and MuJoCo runtime metadata for dimensions.
+    """
+    sensor_metadata = parse_sensor_metadata_from_xml(xml_path)
+    metadata_by_name = {entry["name"]: entry for entry in sensor_metadata}
+    metadata_keys_sorted = sorted(metadata_by_name.keys(), key=len, reverse=True)
+
+    by_unit: dict[str, list[SensorRegistration]] = {}
+    runtime_channels: list[RuntimeSensorChannel] = []
+    for sensor_index in range(model.nsensor):
+        sensor = model.sensor(sensor_index)
+        sensor_name = sensor.name
+        if not sensor_name:
+            sensor_name = f"sensor_{sensor_index}"
+        sensor_name = _sanitize_name(sensor_name)
+        metadata = metadata_by_name.get(
+            sensor_name,
+            {
+                "name": sensor_name,
+                "tag": "unknown",
+                "source_entity": sensor_name,
+            },
+        )
+        if metadata["tag"] == "unknown":
+            for base_name in metadata_keys_sorted:
+                if sensor_name.startswith(base_name):
+                    metadata = metadata_by_name[base_name]
+                    break
+        sensor_tag = metadata["tag"]
+        unit_key = _sensor_tag_to_feagi_unit(sensor_tag)
+        if unit_key is None:
+            continue
+        bundle_type = _sensor_bundle_type(sensor_tag)
+        source_entity = metadata["source_entity"]
+        registration = SensorRegistration(
+            sensor_name=sensor_name,
+            sensor_tag=sensor_tag,
+            bundle_id=sensor_name,
+            bundle_type=bundle_type,
+            source_entity=source_entity,
+        )
+        by_unit.setdefault(unit_key, []).append(registration)
+
+        sensor_dim = int(model.sensor_dim[sensor_index])
+        sensor_addr = int(model.sensor_adr[sensor_index])
+        runtime_channels.append(
+            RuntimeSensorChannel(
+                sensor_name=sensor_name,
+                sensor_tag=sensor_tag,
+                start_index=sensor_addr,
+                length=max(sensor_dim, 1),
+            )
+        )
+
+    for unit_key, entries in by_unit.items():
+        by_unit[unit_key] = sorted(entries, key=lambda entry: entry.sensor_name)
+    runtime_channels.sort(key=lambda channel: (channel.start_index, channel.sensor_name))
+    return by_unit, runtime_channels
+
+
+def _infer_bundle_type(bundle_name: str, labels: list[str]) -> str:
+    """
+    Infer deterministic bundle type from model labels.
+
+    The taxonomy stays simulator-agnostic and is used by registration metadata.
+    """
+    text = f"{bundle_name} {' '.join(labels)}".lower()
+    if "wheel" in text or "steer" in text or "drive" in text:
+        return "wheel_cluster"
+    if "leg" in text or any(token in text for token in ("hip", "knee", "ankle", "thigh", "shin")):
+        return "leg"
+    if any(token in text for token in ("arm", "shoulder", "elbow", "wrist")):
+        return "arm"
+    if any(token in text for token in ("gripper", "finger", "claw", "hand")):
+        return "gripper"
+    if any(token in text for token in ("camera", "imu", "gyro", "lidar", "sensor")):
+        return "sensor_array"
+    return "custom"
+
+
+def _canonical_motor_unit_key(unit_key: str) -> Optional[str]:
+    lowered = unit_key.lower()
+    if "positional" in lowered and "servo" in lowered:
+        return "positional_servo"
+    if "rotary" in lowered and "motor" in lowered:
+        return "rotary_motor"
+    return None
+
+
+def _build_motor_registration_enricher(
+    model_xml: str,
+    group_names: list[str],
+    group_channel_metadata: dict[int, dict[str, list[dict[str, str]]]],
+    sensor_registration_map: dict[str, list[SensorRegistration]],
+) -> Callable[[dict], dict]:
+    source_model = os.path.abspath(model_xml)
+
+    def enrich(registrations: dict) -> dict:
+        output_units = registrations.get("output_units_and_decoder_properties")
+        if not isinstance(output_units, dict):
+            return registrations
+
+        for unit_key, entries in output_units.items():
+            canonical_unit = _canonical_motor_unit_key(str(unit_key))
+            if canonical_unit is None or not isinstance(entries, list):
+                continue
+
+            for entry in entries:
+                if not isinstance(entry, list) or not entry:
+                    continue
+                unit_def = entry[0]
+                if not isinstance(unit_def, dict):
+                    continue
+                group_id = unit_def.get("cortical_unit_index")
+                if not isinstance(group_id, int):
+                    continue
+                if group_id < 0 or group_id >= len(group_names):
+                    raise RuntimeError(
+                        f"Invalid cortical_unit_index {group_id} for motor registration"
+                    )
+
+                bundle_name = _sanitize_name(group_names[group_id])
+                channel_metadata = (
+                    group_channel_metadata
+                    .get(group_id, {})
+                    .get(canonical_unit, [])
+                )
+                unit_def["friendly_name"] = bundle_name
+                device_grouping = unit_def.get("device_grouping")
+                if not isinstance(device_grouping, list) or not device_grouping:
+                    raise RuntimeError(
+                        f"Missing device_grouping for motor unit group {group_id}"
+                    )
+                if len(channel_metadata) < len(device_grouping):
+                    raise RuntimeError(
+                        "Insufficient channel metadata for group "
+                        f"{group_id} unit {canonical_unit}: "
+                        f"expected {len(device_grouping)}, got {len(channel_metadata)}"
+                    )
+
+                for channel_index, channel in enumerate(device_grouping):
+                    if not isinstance(channel, dict):
+                        raise RuntimeError(
+                            f"Invalid device_grouping entry at group {group_id} channel {channel_index}"
+                        )
+                    metadata = channel_metadata[channel_index]
+                    channel_name = metadata["channel_name"]
+                    channel["friendly_name"] = channel_name
+                    device_properties = channel.get("device_properties")
+                    if not isinstance(device_properties, dict):
+                        device_properties = {}
+                    device_properties.update(
+                        {
+                            "bundle_type": metadata["bundle_type"],
+                            "bundle_id": metadata["bundle_id"],
+                            "modality": "motor",
+                            "signal_type": canonical_unit,
+                            "source_model": source_model,
+                            "source_entity": metadata["source_entity"],
+                            "joint_name": metadata["joint_name"],
+                            "link_name": metadata["link_name"],
+                            "actuator_name": metadata["actuator_name"],
+                            "naming_schema_version": "1",
+                        }
+                    )
+                    channel["device_properties"] = device_properties
+
+        input_units = registrations.get("input_units_and_encoder_properties")
+        if isinstance(input_units, dict):
+            for unit_key, unit_registrations in sorted(sensor_registration_map.items()):
+                entries = input_units.get(unit_key)
+                if not isinstance(entries, list) or not entries:
+                    continue
+                first_entry = entries[0]
+                if not isinstance(first_entry, list) or not first_entry:
+                    continue
+                unit_def = first_entry[0]
+                if not isinstance(unit_def, dict):
+                    continue
+                unit_def["friendly_name"] = unit_key.lower()
+                grouping = unit_def.get("device_grouping")
+                if not isinstance(grouping, list):
+                    continue
+                for index, channel in enumerate(grouping):
+                    if index >= len(unit_registrations):
+                        break
+                    if not isinstance(channel, dict):
+                        continue
+                    sensor = unit_registrations[index]
+                    channel["friendly_name"] = sensor.sensor_name
+                    device_properties = channel.get("device_properties")
+                    if not isinstance(device_properties, dict):
+                        device_properties = {}
+                    device_properties.update(
+                        {
+                            "bundle_type": sensor.bundle_type,
+                            "bundle_id": sensor.bundle_id,
+                            "modality": "sensory",
+                            "signal_type": _sensor_tag_to_signal_type(sensor.sensor_tag),
+                            "source_model": source_model,
+                            "source_entity": sensor.source_entity,
+                            "sensor_name": sensor.sensor_name,
+                            "sensor_tag": sensor.sensor_tag,
+                            "naming_schema_version": "1",
+                        }
+                    )
+                    channel["device_properties"] = device_properties
+        return registrations
+
+    return enrich
+
+
+def register_mujoco_sensors_in_cache(cache, sensor_registration_map: dict[str, list[SensorRegistration]]) -> None:
+    """Register MuJoCo sensors into ConnectorAgent cache with typed encoder definitions."""
+    import feagi_rust_py_libs as frpl
+
+    frame_mode = frpl.data_structures.genomic.cortical_area.FrameChangeHandling.Absolute()
+    positioning = frpl.data_structures.genomic.cortical_area.PercentageNeuronPositioning.Linear()
+    descriptors = frpl.connector_core.data_types.descriptors
+    image_props = descriptors.ImageFrameProperties(
+        descriptors.ImageXYResolution(32, 32),
+        descriptors.ColorSpace.Gamma,
+        descriptors.ColorChannelLayout.RGB,
+    )
+
+    sensory_registers = {
+        "Vision": lambda group, count: cache.sensor_Vision_register(
+            group,
+            count,
+            frame_mode,
+            image_props,
+        ),
+        "Gyroscope": lambda group, count: cache.sensor_Gyroscope_register(
+            group,
+            count,
+            frame_mode,
+            10,
+            positioning,
+        ),
+        "Proximity": lambda group, count: cache.sensor_Proximity_register(
+            group,
+            count,
+            frame_mode,
+            10,
+            positioning,
+        ),
+        "Shock": lambda group, count: cache.sensor_Shock_register(
+            group,
+            count,
+            frame_mode,
+            10,
+            positioning,
+        ),
+    }
+
+    for group_index, unit_key in enumerate(sorted(sensor_registration_map.keys())):
+        registrations = sensor_registration_map[unit_key]
+        register = sensory_registers.get(unit_key)
+        if register is None:
+            continue
+        register(group_index, len(registrations))
+
+
 def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
     """
     Register FEAGI motors for all MuJoCo actuators with limb grouping.
@@ -208,11 +566,11 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
     - Type: position → absolute encoding, velocity/motor/general → incremental encoding
 
     Returns:
-        tuple: (motors, group_names, group_channels)
+        tuple: (motors, group_names, group_channels, group_channel_metadata)
     """
     actuator_metadata = parse_actuator_metadata_from_xml(xml_path)
     roots = _iter_mujoco_xml_roots(xml_path, visited=set())
-    body_children, body_parent, body_joints, _ = _build_body_hierarchy(roots)
+    body_children, body_parent, body_joints, joint_to_body = _build_body_hierarchy(roots)
     limb_roots = _select_limb_roots(body_children, body_parent)
     joint_to_limb, joint_order_by_limb = _map_joints_to_limbs(
         limb_roots,
@@ -268,9 +626,16 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
 
     motors: list[tuple] = []
     group_channels: dict[int, dict[str, list[str]]] = {}
+    group_channel_metadata: dict[int, dict[str, list[dict[str, str]]]] = {}
 
     for group_id, group_name in enumerate(group_names):
         group_channels[group_id] = {"positional_servo": [], "rotary_motor": []}
+        group_channel_metadata[group_id] = {"positional_servo": [], "rotary_motor": []}
+        ordered_labels = [
+            _sanitize_name(act_name)
+            for act_name in group_actuator_order.get(group_name, [])
+        ]
+        bundle_type = _infer_bundle_type(group_name, ordered_labels)
         for actuator_name in group_actuator_order.get(group_name, []):
             details = actuator_details.get(actuator_name)
             if details is None:
@@ -304,6 +669,13 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
                 continue
 
             try:
+                joint_name = actuator_metadata.get(actuator_name, {}).get("joint")
+                if isinstance(joint_name, str):
+                    joint_name = _sanitize_name(joint_name)
+                else:
+                    joint_name = ""
+                link_name = joint_to_body.get(joint_name, "") if joint_name else ""
+                source_entity = joint_name or actuator_name
                 if is_bounded:
                     channel_index = len(group_channels[group_id]["positional_servo"])
                     motor = ServoMotor.register(
@@ -313,6 +685,17 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
                         channel_index=channel_index,
                     )
                     group_channels[group_id]["positional_servo"].append(actuator_name)
+                    group_channel_metadata[group_id]["positional_servo"].append(
+                        {
+                            "bundle_type": bundle_type,
+                            "bundle_id": _sanitize_name(group_name),
+                            "channel_name": source_entity,
+                            "source_entity": source_entity,
+                            "joint_name": joint_name,
+                            "link_name": link_name,
+                            "actuator_name": actuator_name,
+                        }
+                    )
                     device_type = "ServoMotor"
                 else:
                     channel_index = len(group_channels[group_id]["rotary_motor"])
@@ -323,6 +706,17 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
                         channel_index=channel_index,
                     )
                     group_channels[group_id]["rotary_motor"].append(actuator_name)
+                    group_channel_metadata[group_id]["rotary_motor"].append(
+                        {
+                            "bundle_type": bundle_type,
+                            "bundle_id": _sanitize_name(group_name),
+                            "channel_name": source_entity,
+                            "source_entity": source_entity,
+                            "joint_name": joint_name,
+                            "link_name": link_name,
+                            "actuator_name": actuator_name,
+                        }
+                    )
                     device_type = "RotaryMotor"
 
                 motors.append(
@@ -344,7 +738,7 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
 
     logger.info("[OK] Registered %d motors with FEAGI\n", len(motors))
 
-    return motors, group_names, group_channels
+    return motors, group_names, group_channels, group_channel_metadata
 
 
 def _signed_percentage_to_float(val) -> float:
@@ -513,12 +907,29 @@ def main():
     )
 
     # Register motors with FEAGI (uses brain_output cache; agent_id must already be set)
-    motors, group_names, group_channels = register_mujoco_motors(
+    sensor_registration_map, runtime_sensor_channels = _build_sensor_registration_map(
+        model,
+        args.model_xml,
+    )
+    logger.info(
+        "[SENSORS] Parsed %d runtime sensor channels across %d FEAGI sensory units",
+        len(runtime_sensor_channels),
+        len(sensor_registration_map),
+    )
+
+    motors, group_names, group_channels, group_channel_metadata = register_mujoco_motors(
         model,
         args.model_xml,
         args.motor_gain,
     )
-    _ = group_names
+    brain_output.set_device_registration_enricher(
+        _build_motor_registration_enricher(
+            args.model_xml,
+            group_names,
+            group_channel_metadata,
+            sensor_registration_map,
+        )
+    )
     logger.info("[MAP] Registered motor-channel mapping:")
     for (
         _motor,
@@ -586,6 +997,8 @@ def main():
                     .PercentageNeuronPositioning.Linear()
                 )
                 z_neuron_resolution = 10
+
+                register_mujoco_sensors_in_cache(cache, sensor_registration_map)
 
                 for group_id, channels in sorted(group_channels.items()):
                     group_servo_count = len(channels.get("positional_servo", []))
@@ -748,6 +1161,19 @@ def main():
                                 applied_ctrl,
                                 stale_frames,
                             )
+
+                    if runtime_sensor_channels:
+                        neuron_pairs: list[tuple[int, float]] = []
+                        cursor = 0
+                        for sensor_channel in runtime_sensor_channels:
+                            for dim in range(sensor_channel.length):
+                                sample_index = sensor_channel.start_index + dim
+                                if sample_index >= len(data.sensordata):
+                                    continue
+                                neuron_pairs.append((cursor, float(data.sensordata[sample_index])))
+                                cursor += 1
+                        if neuron_pairs and hasattr(brain_output._client, "send_sensory_data"):
+                            brain_output._client.send_sensory_data(neuron_pairs, blocking=False)
                 except Exception as e:
                     if frame_number % 120 == 0:
                         logger.info(f"   [WARN] FEAGI receive error: {e}")
