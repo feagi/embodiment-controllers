@@ -4,8 +4,11 @@ Generic MuJoCo Controller - Using FEAGI Python SDK
 Supports any MuJoCo model by passing --model_xml argument
 Copyright 2016-2025 Neuraville Inc.
 """
+import hashlib
 import os
+import shutil
 import sys
+import tempfile
 import time
 import argparse
 import logging
@@ -74,6 +77,213 @@ def _iter_mujoco_xml_roots(xml_path: str, visited: set[str]) -> list[ET.Element]
         roots.extend(_iter_mujoco_xml_roots(include_path, visited))
 
     return roots
+
+
+def _iter_mujoco_xml_roots_with_paths(
+    xml_path: str, visited: set[str]
+) -> list[tuple[ET.Element, str, ET.ElementTree]]:
+    """
+    Collect (root, resolved_path, tree) from entry file and includes.
+    Used for patching actuators; tree is needed to write back.
+    """
+    result: list[tuple[ET.Element, str, ET.ElementTree]] = []
+    resolved_path = os.path.abspath(xml_path)
+    if resolved_path in visited:
+        return result
+    visited.add(resolved_path)
+
+    try:
+        tree = ET.parse(resolved_path)
+    except Exception as e:
+        logger.info("[WARN] Could not parse XML for ctrlrange patch '%s': %s", resolved_path, e)
+        return result
+
+    root = tree.getroot()
+    result.append((root, resolved_path, tree))
+
+    for include in root.findall(".//include"):
+        include_file = include.get("file")
+        if not include_file:
+            continue
+        include_path = _resolve_include_path(resolved_path, include_file)
+        if not os.path.exists(include_path):
+            continue
+        result.extend(_iter_mujoco_xml_roots_with_paths(include_path, visited))
+
+    return result
+
+
+def _build_joint_map_from_roots(roots: list[ET.Element]) -> dict[str, dict[str, str]]:
+    """Build joint_name -> {range, actuatorfrcrange} from XML roots."""
+    joint_map: dict[str, dict[str, str]] = {}
+
+    def visit_body(body: ET.Element) -> None:
+        for joint in body.findall("joint"):
+            joint_name = joint.get("name")
+            if not joint_name:
+                continue
+            joint_name = _sanitize_name(joint_name)
+            joint_map[joint_name] = {
+                "range": joint.get("range", ""),
+                "actuatorfrcrange": joint.get("actuatorfrcrange", ""),
+            }
+        for child in body.findall("body"):
+            visit_body(child)
+
+    for root in roots:
+        worldbody = root.find("worldbody")
+        if worldbody is None:
+            continue
+        for body in worldbody.findall("body"):
+            visit_body(body)
+
+    return joint_map
+
+
+def _infer_ctrlrange(
+    actuator_type: str,
+    joint_name: str,
+    joint_map: dict[str, dict[str, str]],
+) -> tuple[float, float]:
+    """
+    Infer ctrlrange when model reports [0,0].
+    velocity: rad/s; position: joint range; motor/general: joint actuatorfrcrange.
+    """
+    joint_info = joint_map.get(joint_name, {}) if joint_name else {}
+    range_str = joint_info.get("range", "")
+    frc_str = joint_info.get("actuatorfrcrange", "")
+
+    if actuator_type == "velocity":
+        return (-5.0, 5.0)
+
+    if actuator_type in ("motor", "general"):
+        if frc_str:
+            parts = frc_str.split()
+            if len(parts) >= 2:
+                try:
+                    return (float(parts[0]), float(parts[1]))
+                except ValueError:
+                    pass
+        return (-1.0, 1.0)
+
+    if actuator_type == "position":
+        if range_str:
+            parts = range_str.split()
+            if len(parts) >= 2:
+                try:
+                    return (float(parts[0]), float(parts[1]))
+                except ValueError:
+                    pass
+        return (-3.14159, 3.14159)
+
+    return (-1.0, 1.0)
+
+
+def _needs_ctrlrange_patch(actuator: ET.Element) -> bool:
+    """True if actuator has no ctrlrange or ctrlrange is effectively [0,0]."""
+    ctrl = actuator.get("ctrlrange", "").strip()
+    if not ctrl:
+        return True
+    parts = ctrl.split()
+    if len(parts) < 2:
+        return True
+    try:
+        lo, hi = float(parts[0]), float(parts[1])
+        return abs(hi - lo) < 1e-9
+    except ValueError:
+        return True
+
+
+def _prepare_model_load_path(entry_xml_path: str) -> tuple[str, Optional[str]]:
+    """
+    Prepare model path for loading. If any actuator has missing/zero ctrlrange,
+    copy model dir to temp, patch XML, return (patched_entry_path, temp_dir).
+    Otherwise return (entry_xml_path, None).
+    On any error, fall back to original path (no patching).
+    """
+    entry_path = os.path.abspath(entry_xml_path)
+    model_dir = os.path.dirname(entry_path)
+    entry_basename = os.path.basename(entry_path)
+
+    try:
+        if not os.path.isfile(entry_path):
+            logger.info("[WARN] Model path is not a file: %s", entry_path)
+            return (entry_path, None)
+        roots_with_trees = _iter_mujoco_xml_roots_with_paths(entry_path, set())
+        if not roots_with_trees:
+            return (entry_path, None)
+        joint_map = _build_joint_map_from_roots([r for r, _, _ in roots_with_trees])
+
+        needs_patch = False
+        for root, _path, _tree in roots_with_trees:
+            actuator_section = root.find("actuator")
+            if actuator_section is None:
+                continue
+            for actuator in actuator_section:
+                if _needs_ctrlrange_patch(actuator):
+                    needs_patch = True
+                    break
+            if needs_patch:
+                break
+
+        if not needs_patch:
+            return (entry_path, None)
+
+        path_hash = hashlib.sha256(entry_path.encode()).hexdigest()[:12]
+        temp_dir = os.path.join(tempfile.gettempdir(), f"feagi_mujoco_{path_hash}")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        shutil.copytree(model_dir, temp_dir)
+        patched_entry = os.path.join(temp_dir, entry_basename)
+
+        for root, path, tree in roots_with_trees:
+            actuator_section = root.find("actuator")
+            if actuator_section is None:
+                continue
+            modified = False
+            for actuator in actuator_section:
+                if not _needs_ctrlrange_patch(actuator):
+                    continue
+                joint_name = _sanitize_name(actuator.get("joint", "") or "")
+                act_type = actuator.tag
+                lo, hi = _infer_ctrlrange(act_type, joint_name, joint_map)
+                actuator.set("ctrlrange", f"{lo} {hi}")
+                if act_type == "position":
+                    # Explicitly disable inheritrange to avoid conflicts with class-level
+                    # defaults that may still define inheritrange during MJCF compilation.
+                    actuator.set("inheritrange", "0")
+                elif "inheritrange" in actuator.attrib:
+                    del actuator.attrib["inheritrange"]
+                modified = True
+                logger.info(
+                    "[PATCH] Inferred ctrlrange for '%s' (type=%s): [%.4f, %.4f]",
+                    actuator.get("name", "?"),
+                    act_type,
+                    lo,
+                    hi,
+                )
+            if modified:
+                rel_path = os.path.relpath(path, model_dir)
+                out_path = os.path.join(temp_dir, rel_path)
+                out_dir = os.path.dirname(out_path)
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                tree.write(
+                    out_path,
+                    default_namespace="",
+                    xml_declaration=True,
+                    method="xml",
+                    encoding="utf-8",
+                )
+        logger.info("[PATCH] Model with inferred ctrlrange at: %s", patched_entry)
+        return (patched_entry, temp_dir)
+    except Exception as e:
+        logger.info(
+            "[WARN] ctrlrange patching failed, using original model: %s",
+            e,
+            exc_info=True,
+        )
+        return (entry_path, None)
 
 
 def _sanitize_name(name: str) -> str:
@@ -861,14 +1071,19 @@ def main():
             "Missing auth token. Provide --auth-token-b64 or set FEAGI_AUTH_TOKEN_B64."
         )
 
-    # Load MuJoCo model from provided path
+    # Prepare model path: patch missing/zero ctrlrange in temp copy if needed
+    model_load_path, temp_model_dir = _prepare_model_load_path(args.model_xml)
+
+    # Load MuJoCo model from provided path (or patched temp copy)
     try:
-        logger.info(f"[LOAD] Loading model from: {args.model_xml}")
-        model = mujoco.MjModel.from_xml_path(args.model_xml)
+        logger.info(f"[LOAD] Loading model from: {model_load_path}")
+        model = mujoco.MjModel.from_xml_path(model_load_path)
         data = mujoco.MjData(model)
         logger.info(f"[OK] Model loaded: {model.nq} DOF, {model.nu} actuators")
     except Exception as e:
-        logger.info(f"[FAIL] Failed to load model '{args.model_xml}': {e}")
+        logger.info(f"[FAIL] Failed to load model '{model_load_path}': {e}")
+        if temp_model_dir and os.path.exists(temp_model_dir):
+            shutil.rmtree(temp_model_dir, ignore_errors=True)
         return 1
 
     # Determine number of actuated joints (skip free joints)
@@ -909,7 +1124,7 @@ def main():
     # Register motors with FEAGI (uses brain_output cache; agent_id must already be set)
     sensor_registration_map, runtime_sensor_channels = _build_sensor_registration_map(
         model,
-        args.model_xml,
+        model_load_path,
     )
     logger.info(
         "[SENSORS] Parsed %d runtime sensor channels across %d FEAGI sensory units",
@@ -919,12 +1134,12 @@ def main():
 
     motors, group_names, group_channels, group_channel_metadata = register_mujoco_motors(
         model,
-        args.model_xml,
+        model_load_path,
         args.motor_gain,
     )
     brain_output.set_device_registration_enricher(
         _build_motor_registration_enricher(
-            args.model_xml,
+            model_load_path,
             group_names,
             group_channel_metadata,
             sensor_registration_map,
@@ -958,6 +1173,8 @@ def main():
     if len(motors) == 0:
         logger.info("[FAIL] No motors registered - cannot connect to FEAGI")
         logger.info("   Aborting startup: FEAGI motor IO is required.")
+        if temp_model_dir and os.path.exists(temp_model_dir):
+            shutil.rmtree(temp_model_dir, ignore_errors=True)
         return 1
     else:
         feagi_enabled = True
@@ -1263,6 +1480,13 @@ def main():
             logger.info("[OK] Disconnected from FEAGI motor stream")
         except Exception as e:
             logger.info(f"[WARN] Error disconnecting: {e}")
+
+    # Cleanup temp model dir if we patched ctrlrange
+    if temp_model_dir and os.path.exists(temp_model_dir):
+        try:
+            shutil.rmtree(temp_model_dir, ignore_errors=True)
+        except Exception as e:
+            logger.info("[WARN] Failed to remove temp model dir: %s", e)
 
     logger.info("[DONE] MuJoCo controller shutdown complete")
     return 0
