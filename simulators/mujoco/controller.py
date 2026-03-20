@@ -13,7 +13,7 @@ import time
 import argparse
 import logging
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -155,6 +155,21 @@ def _infer_ctrlrange(
 
     if actuator_type == "velocity":
         return (-5.0, 5.0)
+
+    if actuator_type == "adhesion":
+        # MuJoCo adhesion controls cannot be negative.
+        if frc_str:
+            parts = frc_str.split()
+            if len(parts) >= 2:
+                try:
+                    lo = max(0.0, float(parts[0]))
+                    hi = max(lo, float(parts[1]))
+                    if hi == 0.0:
+                        hi = 1.0
+                    return (lo, hi)
+                except ValueError:
+                    pass
+        return (0.0, 1.0)
 
     if actuator_type in ("motor", "general"):
         if frc_str:
@@ -380,12 +395,29 @@ def _map_joints_to_limbs(
 
 def parse_actuator_metadata_from_xml(xml_path: str) -> dict:
     """Parse MuJoCo XML (including nested includes) to extract actuator metadata."""
-    actuator_metadata: dict[str, dict[str, Optional[str]]] = {}
+    actuator_metadata: dict[str, dict[str, Any]] = {}
 
     try:
         logger.info("Include parsing enabled. Entry XML: %s", os.path.abspath(xml_path))
         roots = _iter_mujoco_xml_roots(xml_path, visited=set())
         logger.info("[PARSE] Total XML roots parsed: %d", len(roots))
+        tendon_to_joints: dict[str, list[str]] = {}
+        for root in roots:
+            tendon_section = root.find("tendon")
+            if tendon_section is None:
+                continue
+            for tendon in tendon_section:
+                tendon_name = tendon.get("name")
+                if not tendon_name:
+                    continue
+                resolved_joints: list[str] = []
+                for tendon_joint in tendon.findall(".//joint"):
+                    joint_name = tendon_joint.get("joint")
+                    if not joint_name:
+                        continue
+                    resolved_joints.append(_sanitize_name(joint_name))
+                if resolved_joints:
+                    tendon_to_joints[_sanitize_name(tendon_name)] = resolved_joints
         for root in roots:
             logger.info("Root tag: %s", root.tag)
             actuator_section = root.find("actuator")
@@ -398,9 +430,20 @@ def parse_actuator_metadata_from_xml(xml_path: str) -> dict:
                     name = f"actuator_{counter}"
                     counter += 1
                 name = _sanitize_name(name)
+                joint_name = actuator.get("joint")
+                tendon_name = actuator.get("tendon")
+                joint_names: list[str] = []
+                if joint_name:
+                    joint_names = [_sanitize_name(joint_name)]
+                elif tendon_name:
+                    joint_names = tendon_to_joints.get(_sanitize_name(tendon_name), [])
+                source_entity = " + ".join(joint_names) if joint_names else name
                 actuator_metadata[name] = {
                     "type": actuator.tag,
-                    "joint": actuator.get("joint"),
+                    "joint": joint_names[0] if joint_names else None,
+                    "joint_names": joint_names,
+                    "tendon": _sanitize_name(tendon_name) if tendon_name else None,
+                    "source_entity": source_entity,
                 }
 
         logger.info("[PARSED] Parsed %d actuators from XML", len(actuator_metadata))
@@ -837,8 +880,16 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
     motors: list[tuple] = []
     group_channels: dict[int, dict[str, list[str]]] = {}
     group_channel_metadata: dict[int, dict[str, list[dict[str, str]]]] = {}
+    # Use compact FEAGI group indexing (0..N-1 for non-empty actuator groups).
+    # This keeps motor cortical IDs deterministic across models where parsed
+    # group labels may start at non-zero indices.
+    compact_group_names = [
+        name for name in group_names if group_actuator_order.get(name)
+    ]
+    if not compact_group_names:
+        compact_group_names = list(group_names)
 
-    for group_id, group_name in enumerate(group_names):
+    for group_id, group_name in enumerate(compact_group_names):
         group_channels[group_id] = {"positional_servo": [], "rotary_motor": []}
         group_channel_metadata[group_id] = {"positional_servo": [], "rotary_motor": []}
         ordered_labels = [
@@ -879,12 +930,26 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
                 continue
 
             try:
-                joint_name = actuator_metadata.get(actuator_name, {}).get("joint")
+                actuator_info = actuator_metadata.get(actuator_name, {})
+                joint_name = actuator_info.get("joint")
                 if isinstance(joint_name, str):
                     joint_name = _sanitize_name(joint_name)
                 else:
                     joint_name = ""
+                joint_names = actuator_info.get("joint_names", [])
+                if not isinstance(joint_names, list):
+                    joint_names = []
+                resolved_joint_names = [
+                    _sanitize_name(name)
+                    for name in joint_names
+                    if isinstance(name, str) and name
+                ]
+                if not joint_name and resolved_joint_names:
+                    joint_name = resolved_joint_names[0]
                 link_name = joint_to_body.get(joint_name, "") if joint_name else ""
+                # Use one canonical source label per FEAGI channel.
+                # Tendon actuators may reference multiple joints internally, but
+                # one cortical channel should map to one display identity in BV.
                 source_entity = joint_name or actuator_name
                 if is_bounded:
                     channel_index = len(group_channels[group_id]["positional_servo"])
@@ -948,7 +1013,7 @@ def register_mujoco_motors(model, xml_path, motor_gain: float = 1.0):
 
     logger.info("[OK] Registered %d motors with FEAGI\n", len(motors))
 
-    return motors, group_names, group_channels, group_channel_metadata
+    return motors, compact_group_names, group_channels, group_channel_metadata
 
 
 def _signed_percentage_to_float(val) -> float:
