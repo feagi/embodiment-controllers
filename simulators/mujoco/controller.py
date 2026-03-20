@@ -5,6 +5,7 @@ Supports any MuJoCo model by passing --model_xml argument
 Copyright 2016-2025 Neuraville Inc.
 """
 import hashlib
+import base64
 import os
 import shutil
 import sys
@@ -1039,6 +1040,45 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _build_expected_motor_cortical_ids(motors: list[tuple]) -> list[str]:
+    """
+    Build deterministic expected motor cortical IDs used for SDK registration verification.
+
+    This keeps controller behavior stable even when Python SDK/venv variants differ in
+    internal expected-ID derivation logic.
+    """
+    expected: set[str] = set()
+    for motor_entry in motors:
+        motor = motor_entry[0]
+        group_id = int(motor_entry[5])
+        encoding = str(motor_entry[8])
+        if isinstance(motor, ServoMotor):
+            # PositionalServo emits absolute + incremental percentage cortical areas.
+            # [o,p,s,e, config_lo, config_hi, sub_unit, group]
+            expected.add(
+                base64.b64encode(
+                    bytes([111, 112, 115, 101, 1, 0, 0, group_id & 0xFF])
+                ).decode()
+            )
+            expected.add(
+                base64.b64encode(
+                    bytes([111, 112, 115, 101, 1, 1, 1, group_id & 0xFF])
+                ).decode()
+            )
+        elif isinstance(motor, RotaryMotor):
+            # RotaryMotor uses signed-percentage ("mot"). Respect runtime encoding mode.
+            frame_bit = 1 if encoding == "incremental" else 0
+            config_lo = 5
+            config_hi = frame_bit
+            sub_unit = 0
+            expected.add(
+                base64.b64encode(
+                    bytes([111, 109, 111, 116, config_lo, config_hi, sub_unit, group_id & 0xFF])
+                ).decode()
+            )
+    return sorted(expected)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generic MuJoCo Controller for FEAGI")
     # Network config must be explicit (no defaults).
@@ -1312,6 +1352,9 @@ def main():
             # ConnectorAgent. We avoid brain_output.connect()/receive() because parts
             # of the Python SDK still reference removed Rust types (MotorCorticalType).
             logger.info("[CONN] Connecting motor stream (Rust SDK)...")
+            expected_motor_ids = _build_expected_motor_cortical_ids(motors)
+            if hasattr(brain_output, "_collect_motor_cortical_ids"):
+                brain_output._collect_motor_cortical_ids = lambda: list(expected_motor_ids)
             brain_output.connect()
             logger.info("   [OK] Motor stream connected!")
             
@@ -1346,19 +1389,39 @@ def main():
         start_time = time.time()
         frame_number = 0
         motor_telemetry_state: dict[tuple[int, int], dict[str, float]] = {}
+        motor_channel_labels: dict[tuple[int, int], str] = {
+            (group_id, channel_index): actuator_name
+            for (
+                _motor,
+                actuator_name,
+                _actuator_idx,
+                _min_val,
+                _max_val,
+                group_id,
+                channel_index,
+                _device_type,
+                _encoding,
+            ) in motors
+        }
+        telemetry_window_frames = 120
+        recent_change_window_frames = SPEED * 5
+        window_changed_samples = 0
+        window_changed_channels: set[tuple[int, int]] = set()
+        window_group_stats: dict[int, dict[str, float]] = {}
 
         while viewer.is_running() and time.time() - start_time < RUNTIME:
             step_start = time.time()
 
             # Receive motor commands from FEAGI
             changed_in_tick = 0
-            group_stats: dict[int, dict[str, float]] = {}
+            frame_group_stats: dict[int, dict[str, float]] = {}
+            changed_channels_this_tick: list[tuple[int, int, str, float, float]] = []
             if feagi_enabled:
                 try:
                     brain_output.receive()
 
                     # Apply FEAGI commands to MuJoCo actuators
-                    for motor_idx, (
+                    for (
                         motor,
                         actuator_name,
                         actuator_idx,
@@ -1366,9 +1429,9 @@ def main():
                         max_val,
                         group_id,
                         channel_index,
-                        device_type,
-                        encoding,
-                    ) in enumerate(motors):
+                        _device_type,
+                        _encoding,
+                    ) in motors:
                         norm_cmd = 0.0
                         applied_ctrl = 0.0
                         if isinstance(motor, ServoMotor):
@@ -1404,15 +1467,26 @@ def main():
                             {
                                 "last_norm_cmd": norm_cmd,
                                 "last_change_frame": 0.0,
+                                "seen_change": False,
                             },
                         )
                         was_changed = abs(norm_cmd - state["last_norm_cmd"]) > 1e-4
                         if was_changed:
                             changed_in_tick += 1
                             state["last_change_frame"] = float(frame_number)
+                            state["seen_change"] = True
+                            changed_channels_this_tick.append(
+                                (
+                                    group_id,
+                                    channel_index,
+                                    actuator_name,
+                                    norm_cmd,
+                                    applied_ctrl,
+                                )
+                            )
                         state["last_norm_cmd"] = norm_cmd
 
-                        stats = group_stats.setdefault(
+                        stats = frame_group_stats.setdefault(
                             group_id,
                             {
                                 "count": 0.0,
@@ -1426,23 +1500,6 @@ def main():
                         stats["max_abs"] = max(stats["max_abs"], abs(norm_cmd))
                         if was_changed:
                             stats["changed"] += 1.0
-
-                        if frame_number % 120 == 0 and motor_idx < 4:
-                            stale_frames = (
-                                frame_number - int(state["last_change_frame"])
-                            )
-                            logger.info(
-                                "   [MOTOR-CH] g=%d c=%d type=%s enc=%s act=%s "
-                                "norm=%.4f ctrl=%.4f stale_frames=%d",
-                                group_id,
-                                channel_index,
-                                device_type,
-                                encoding,
-                                actuator_name,
-                                norm_cmd,
-                                applied_ctrl,
-                                stale_frames,
-                            )
 
                     if runtime_sensor_channels:
                         neuron_pairs: list[tuple[int, float]] = []
@@ -1462,66 +1519,158 @@ def main():
                         import traceback
                         traceback.print_exc()
 
+            if feagi_enabled:
+                window_changed_samples += changed_in_tick
+                for key in changed_channels_this_tick:
+                    window_changed_channels.add((key[0], key[1]))
+                for group_id, stats in frame_group_stats.items():
+                    window_stats = window_group_stats.setdefault(
+                        group_id,
+                        {
+                            "count": 0.0,
+                            "changed": 0.0,
+                            "sum_abs": 0.0,
+                            "max_abs": 0.0,
+                        },
+                    )
+                    window_stats["count"] += stats["count"]
+                    window_stats["changed"] += stats["changed"]
+                    window_stats["sum_abs"] += stats["sum_abs"]
+                    window_stats["max_abs"] = max(
+                        window_stats["max_abs"],
+                        stats["max_abs"],
+                    )
+
             # Step simulation
             mujoco.mj_step(model, data)
 
             # Log every 120 frames (1 second at 120Hz)
-            if frame_number % 120 == 0:
+            if frame_number % telemetry_window_frames == 0:
                 elapsed = time.time() - start_time
                 mode = "FEAGI" if feagi_enabled else "Standalone"
-                logger.info(
-                    "[FRAME] Frame %d | Time: %.1fs | Mode: %s",
-                    frame_number,
-                    elapsed,
-                    mode,
-                )
                 if feagi_enabled:
                     global_max_abs = 0.0
-                    for stats in group_stats.values():
+                    for stats in window_group_stats.values():
                         global_max_abs = max(global_max_abs, stats["max_abs"])
-                    logger.info(
-                        "   [TELE] changed=%d/%d global_max_abs_norm=%.4f",
-                        changed_in_tick,
-                        len(motors),
-                        global_max_abs,
+                    recently_changed_channels = [
+                        (group_id, channel_index, state)
+                        for (group_id, channel_index), state in (
+                            motor_telemetry_state.items()
+                        )
+                        if state.get("seen_change")
+                        and (
+                            frame_number - int(state["last_change_frame"])
+                            <= recent_change_window_frames
+                        )
+                    ]
+                    never_changed = [
+                        (group_id, channel_index)
+                        for (group_id, channel_index), state in (
+                            motor_telemetry_state.items()
+                        )
+                        if not state.get("seen_change")
+                    ]
+                    has_recent_activity = (
+                        window_changed_samples > 0
+                        or len(recently_changed_channels) > 0
+                        or global_max_abs > 0.0
                     )
-                    for group_id, stats in sorted(group_stats.items()):
-                        count = max(1.0, stats["count"])
+                    emit_window = has_recent_activity
+                    if emit_window:
+                        logger.info(
+                            "[FRAME] Frame %d | Time: %.1fs | Mode: %s",
+                            frame_number,
+                            elapsed,
+                            mode,
+                        )
                         logger.info(
                             (
-                                "   [TELE][GROUP %d] changed=%d/%d "
-                                "mean_abs=%.4f max_abs=%.4f"
+                                "   [TELE] changed_samples=%d changed_channels=%d/%d "
+                                "active_5s=%d never_changed=%d global_max_abs_norm=%.4f"
                             ),
-                            group_id,
-                            int(stats["changed"]),
-                            int(stats["count"]),
-                            stats["sum_abs"] / count,
-                            stats["max_abs"],
+                            window_changed_samples,
+                            len(window_changed_channels),
+                            len(motors),
+                            len(recently_changed_channels),
+                            len(never_changed),
+                            global_max_abs,
                         )
-                    stale_sorted = sorted(
-                        (
-                            (
-                                frame_number - int(state["last_change_frame"]),
+                        for group_id, stats in sorted(window_group_stats.items()):
+                            count = max(1.0, stats["count"])
+                            should_log_group = (
+                                stats["changed"] > 0
+                                or stats["max_abs"] > 0.0
+                            )
+                            if not should_log_group:
+                                continue
+                            logger.info(
+                                (
+                                    "   [TELE][GROUP %d] changed_samples=%d/%d "
+                                    "mean_abs=%.4f max_abs=%.4f"
+                                ),
                                 group_id,
-                                channel_index,
-                                state["last_norm_cmd"],
+                                int(stats["changed"]),
+                                int(stats["count"]),
+                                stats["sum_abs"] / count,
+                                stats["max_abs"],
                             )
-                            for (group_id, channel_index), state in (
-                                motor_telemetry_state.items()
+                        if window_changed_channels:
+                            sorted_changes = sorted(window_changed_channels)[:8]
+                            change_text = ", ".join(
+                                (
+                                    f"g{group_id}:c{channel_index}"
+                                    f"({motor_channel_labels.get((group_id, channel_index), 'unknown')})"
+                                )
+                                for group_id, channel_index in sorted_changes
                             )
-                        ),
-                        reverse=True,
-                    )
-                    if stale_sorted:
-                        top_stale = stale_sorted[:4]
-                        stale_text = ", ".join(
+                            logger.info("   [TELE][CHANGED] %s", change_text)
+
+                        stale_sorted = sorted(
                             (
-                                f"g{group_id}:c{channel_index}"
-                                f"(stale={stale_frames},norm={norm:.4f})"
-                            )
-                            for stale_frames, group_id, channel_index, norm in top_stale
+                                (
+                                    frame_number - int(state["last_change_frame"]),
+                                    group_id,
+                                    channel_index,
+                                    state["last_norm_cmd"],
+                                )
+                                for (group_id, channel_index), state in (
+                                    motor_telemetry_state.items()
+                                )
+                                if state.get("seen_change")
+                            ),
+                            reverse=True,
                         )
-                        logger.info("   [TELE][STALE] %s", stale_text)
+                        if stale_sorted:
+                            top_stale = stale_sorted[:6]
+                            stale_text = ", ".join(
+                                (
+                                    f"g{group_id}:c{channel_index}"
+                                    f"({motor_channel_labels.get((group_id, channel_index), 'unknown')})"
+                                    f"(stale={stale_frames},norm={norm:.4f})"
+                                )
+                                for stale_frames, group_id, channel_index, norm in top_stale
+                            )
+                            logger.info("   [TELE][STALE] %s", stale_text)
+                        if never_changed:
+                            never_text = ", ".join(
+                                (
+                                    f"g{group_id}:c{channel_index}"
+                                    f"({motor_channel_labels.get((group_id, channel_index), 'unknown')})"
+                                )
+                                for group_id, channel_index in never_changed[:6]
+                            )
+                            logger.info("   [TELE][NEVER] %s", never_text)
+
+                    window_changed_samples = 0
+                    window_changed_channels.clear()
+                    window_group_stats.clear()
+                else:
+                    logger.info(
+                        "[FRAME] Frame %d | Time: %.1fs | Mode: %s",
+                        frame_number,
+                        elapsed,
+                        mode,
+                    )
 
             # Sync viewer
             viewer.sync()
