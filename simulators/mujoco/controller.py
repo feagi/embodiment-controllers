@@ -650,7 +650,7 @@ def _sensor_tag_to_feagi_unit(sensor_tag: str) -> Optional[str]:
     normalized = sensor_tag.lower()
     if normalized in ("rangefinder", "camprojection", "camdistance"):
         return "Vision"
-    if normalized in ("framequat", "gyro", "ballquat"):
+    if normalized in ("framequat", "gyro", "ballquat", "magnetometer"):
         return "Gyroscope"
     if normalized in (
         "distance",
@@ -685,7 +685,7 @@ def _sensor_tag_to_signal_type(sensor_tag: str) -> str:
     normalized = sensor_tag.lower()
     if normalized in ("rangefinder", "camprojection", "camdistance"):
         return "vision"
-    if normalized in ("framequat", "gyro"):
+    if normalized in ("framequat", "gyro", "magnetometer"):
         return "gyroscope"
     if normalized in (
         "distance",
@@ -720,7 +720,7 @@ def _sensor_bundle_type(sensor_tag: str) -> str:
     normalized = sensor_tag.lower()
     if normalized in ("rangefinder", "camprojection", "camdistance"):
         return "camera_rig"
-    if normalized in ("framequat", "gyro", "accelerometer"):
+    if normalized in ("framequat", "gyro", "accelerometer", "magnetometer"):
         return "imu"
     if normalized in (
         "distance",
@@ -1301,7 +1301,7 @@ def register_mujoco_motors(
             min_val, max_val = details["range"]
             is_bounded = not (np.isinf(min_val) or np.isinf(max_val))
 
-            if actuator_type not in ["position", "velocity", "motor", "general"]:
+            if actuator_type not in ["position", "velocity", "motor", "general", "adhesion"]:
                 raise RuntimeError(
                     f"Unsupported MuJoCo actuator type '{actuator_type}' for actuator '{actuator_name}'"
                 )

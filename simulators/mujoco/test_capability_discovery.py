@@ -170,6 +170,76 @@ def test_strict_mode_accepts_velocimeter_sensor(tmp_path: Path):
     assert any(channel.sensor_tag == "velocimeter" for channel in runtime_channels)
 
 
+def test_strict_mode_accepts_magnetometer_sensor(tmp_path: Path):
+    """magnetometer sensor should be treated as supported IMU/gyroscope data."""
+    controller = _load_controller_module()
+    xml_path = tmp_path / "magnetometer_sensor.xml"
+    xml_path.write_text(
+        """
+<mujoco model="magnetometer_sensor">
+  <worldbody>
+    <body name="base">
+      <geom type="sphere" pos="0 0 0" size="0.02"/>
+      <site name="imu_site" pos="0 0 0"/>
+    </body>
+  </worldbody>
+  <sensor>
+    <magnetometer name="mag_field" site="imu_site"/>
+  </sensor>
+</mujoco>
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    model = mujoco.MjModel.from_xml_path(str(xml_path))
+    sensor_map, runtime_channels = controller._build_sensor_registration_map(
+        model,
+        str(xml_path),
+        strict_mode=True,
+    )
+
+    assert "Gyroscope" in sensor_map
+    assert any(entry.sensor_tag == "magnetometer" for entry in sensor_map["Gyroscope"])
+    assert any(channel.sensor_tag == "magnetometer" for channel in runtime_channels)
+
+
+def test_register_motors_accepts_adhesion_actuators():
+    """Adhesion actuators should be accepted by strict actuator parsing."""
+    controller = _load_controller_module()
+    flybody_xml = (
+        Path(__file__).resolve().parents[3]
+        / "embodiments"
+        / "mujoco_flybody"
+        / "model"
+        / "fruitfly.xml"
+    )
+    model = mujoco.MjModel.from_xml_path(str(flybody_xml))
+
+    class _DummyServoMotor:
+        @staticmethod
+        def register(**kwargs):
+            return ("servo", kwargs)
+
+    class _DummyRotaryMotor:
+        @staticmethod
+        def register(**kwargs):
+            return ("rotary", kwargs)
+
+    controller.ServoMotor = _DummyServoMotor
+    controller.RotaryMotor = _DummyRotaryMotor
+
+    motors, _group_names, _group_channels, _group_channel_metadata = (
+        controller.register_mujoco_motors(
+            model,
+            str(flybody_xml),
+            1.0,
+            None,
+        )
+    )
+
+    assert motors, "Expected flybody model to register motors including adhesion actuators"
+
+
 def test_spot_name_mapping_translates_motor_and_sensor_labels():
     """Name mapping table should translate Spot abbreviations to readable labels."""
     controller = _load_controller_module()
