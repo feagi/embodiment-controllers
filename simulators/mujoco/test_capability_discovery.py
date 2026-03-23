@@ -137,6 +137,39 @@ def test_strict_mode_accepts_geomdist_sensor(tmp_path: Path):
     assert any(channel.sensor_tag == "geomdist" for channel in runtime_channels)
 
 
+def test_strict_mode_accepts_velocimeter_sensor(tmp_path: Path):
+    """velocimeter sensor should be treated as supported proximity data."""
+    controller = _load_controller_module()
+    xml_path = tmp_path / "velocimeter_sensor.xml"
+    xml_path.write_text(
+        """
+<mujoco model="velocimeter_sensor">
+  <worldbody>
+    <body name="base">
+      <geom type="sphere" pos="0 0 0" size="0.02"/>
+      <site name="imu_site" pos="0 0 0"/>
+    </body>
+  </worldbody>
+  <sensor>
+    <velocimeter name="linvel" site="imu_site"/>
+  </sensor>
+</mujoco>
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    model = mujoco.MjModel.from_xml_path(str(xml_path))
+    sensor_map, runtime_channels = controller._build_sensor_registration_map(
+        model,
+        str(xml_path),
+        strict_mode=True,
+    )
+
+    assert "Proximity" in sensor_map
+    assert any(entry.sensor_tag == "velocimeter" for entry in sensor_map["Proximity"])
+    assert any(channel.sensor_tag == "velocimeter" for channel in runtime_channels)
+
+
 def test_spot_name_mapping_translates_motor_and_sensor_labels():
     """Name mapping table should translate Spot abbreviations to readable labels."""
     controller = _load_controller_module()
