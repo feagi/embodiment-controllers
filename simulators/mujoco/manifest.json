@@ -1,0 +1,156 @@
+{
+  "schema_version": "1.0.0",
+  "bundle": {
+    "id": "mujoco",
+    "version": "2.0.0",
+    "created_at": "2025-12-17T00:00:00Z",
+    "updated_at": "2025-12-17T00:00:00Z",
+    "build_number": 1,
+    "checksum": ""
+  },
+  "controller": {
+    "name": "MuJoCo Physics Simulator",
+    "description": "Generic MuJoCo controller supporting any MuJoCo XML model",
+    "long_description_file": "README.md",
+    "author": {
+      "name": "Neuraville Inc.",
+      "email": "support@neuraville.com",
+      "url": "https://neuraville.com"
+    },
+    "category": "simulator",
+    "subcategory": "physics",
+    "tags": ["mujoco", "physics", "robotics", "humanoid", "simulation"],
+    "license": "Proprietary"
+  },
+  "source": {
+    "repository": "https://github.com/feagi/nrs-embodiments",
+    "path": "controllers/simulators/mujoco",
+    "commit": "",
+    "branch": "main",
+    "last_synced": "2025-12-17T00:00:00Z"
+  },
+  "requirements": {
+    "feagi_core": {
+      "min_version": "2.1.33",
+      "max_version": null,
+      "tested_with": "2.1.33"
+    },
+    "python": {
+      "min_version": "3.10.0",
+      "max_version": "3.12.0",
+      "tested_with": "3.10.15"
+    },
+    "platform": {
+      "supported": ["windows", "macos", "linux"],
+      "tested": ["macos", "linux"]
+    },
+    "external": null,
+    "hardware": {
+      "cpu_cores": 2,
+      "ram_mb": 4096,
+      "disk_mb": 500,
+      "gpu": false
+    },
+    "dependencies": {
+      "system": [],
+      "python": [
+        "mujoco==3.2.3",
+        "numpy==1.26.4",
+        "feagi-core>=2.1.33"
+      ]
+    }
+  },
+  "capabilities": {
+    "sensors": {
+      "proprioception": {
+        "count": 21,
+        "description": "Joint position sensors for humanoid model"
+      }
+    },
+    "actuators": {
+      "servo": {
+        "count": 21,
+        "description": "Servo motors for humanoid joints"
+      }
+    }
+  },
+  "media": {
+    "thumbnail": {
+      "url": "",
+      "checksum": ""
+    },
+    "hero": {
+      "url": "",
+      "checksum": ""
+    },
+    "demo_video": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "demo_gif": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "screenshots": []
+  },
+  "examples": [
+    {
+      "id": "humanoid",
+      "name": "Humanoid Model",
+      "description": "Standard MuJoCo humanoid with 21 DOF",
+      "path": "",
+      "genome": "",
+      "connectome": "",
+      "readme": "",
+      "available": true,
+      "status": "available"
+    }
+  ],
+  "installation": {
+    "type": "python_venv",
+    "entry_point": "controller.py",
+    "install_script": null,
+    "post_install_checks": []
+  },
+  "marketplace": {
+    "status": "active",
+    "featured": false,
+    "price": {
+      "amount": 0,
+      "currency": "USD",
+      "model": "free"
+    },
+    "stats": {
+      "downloads": 0,
+      "rating": 0.0,
+      "rating_count": 0,
+      "views": 0
+    },
+    "visibility": "public",
+    "review": {
+      "status": "approved",
+      "reviewed_by": "system",
+      "reviewed_at": "2025-12-17T00:00:00Z",
+      "notes": "Auto-approved system controller"
+    }
+  },
+  "support": {
+    "documentation": "https://docs.feagi.org",
+    "issues": "https://github.com/feagi/nrs-embodiments/issues",
+    "discord": "https://discord.gg/feagi",
+    "email": "support@neuraville.com"
+  },
+  "changelog": [
+    {
+      "version": "2.0.0",
+      "date": "2025-12-17",
+      "changes": [
+        "Updated for FEAGI 2.0",
+        "Added manifest.json support",
+        "Uses bundled Python 3.10.15"
+      ]
+    }
+  ]
+}
