@@ -1200,7 +1200,7 @@ def register_mujoco_motors(
 
     Maps MuJoCo actuators to FEAGI ServoMotors or RotaryMotors based on:
     - Range: bounded → ServoMotor, unbounded → RotaryMotor
-    - Type: position → absolute encoding, velocity/motor/general → incremental encoding
+    - Type: bounded → absolute-safe ServoMotor, unbounded → incremental RotaryMotor
 
     Returns:
         tuple: (motors, group_names, group_channels, group_channel_metadata)
@@ -1306,10 +1306,11 @@ def register_mujoco_motors(
                     f"Unsupported MuJoCo actuator type '{actuator_type}' for actuator '{actuator_name}'"
                 )
 
-            # Encoding for Python SDK: use "incremental" for all
-            # The Rust decoder handles both absolute and incremental cortical areas
-            # and outputs values appropriately (incremental centered at 0.5)
-            encoding = "incremental"
+            # Use absolute-safe default for bounded channels (ServoMotor).
+            # Runtime command_mode from FEAGI still switches to incremental when
+            # incremental cortical packets are present, but this prevents
+            # unintended accumulation if a packet arrives without explicit mode.
+            encoding = "absolute" if is_bounded else "incremental"
 
             try:
                 actuator_info = actuator_metadata.get(actuator_name, {})

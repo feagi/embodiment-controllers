@@ -238,6 +238,11 @@ def test_register_motors_accepts_adhesion_actuators():
     )
 
     assert motors, "Expected flybody model to register motors including adhesion actuators"
+    servo_encodings = [
+        encoding for *_rest, device_type, encoding in motors if device_type == "ServoMotor"
+    ]
+    assert servo_encodings, "Expected flybody model to register at least one ServoMotor"
+    assert set(servo_encodings) == {"absolute"}
 
 
 def test_spot_name_mapping_translates_motor_and_sensor_labels():
