@@ -14,6 +14,8 @@ import tempfile
 import time
 import argparse
 import logging
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 import numpy as np
@@ -1586,6 +1588,129 @@ def _build_expected_motor_cortical_ids(motors: list[tuple]) -> list[str]:
     return sorted(expected)
 
 
+def _health_check_url(feagi_host: str, feagi_api_port: int) -> str:
+    """Build FEAGI health check endpoint URL."""
+    return f"http://{feagi_host}:{feagi_api_port}/v1/system/health_check"
+
+
+def _simulation_timestep_url(feagi_host: str, feagi_api_port: int) -> str:
+    """Build FEAGI simulation timestep endpoint URL."""
+    return f"http://{feagi_host}:{feagi_api_port}/v1/burst_engine/simulation_timestep"
+
+
+def _read_feagi_simulation_rate_hz(
+    feagi_host: str,
+    feagi_api_port: int,
+    feagi_http_timeout_s: float,
+) -> float:
+    """Read current FEAGI simulation rate from health check."""
+    endpoint = _health_check_url(feagi_host, feagi_api_port)
+    request = urllib.request.Request(endpoint, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=feagi_http_timeout_s) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"FEAGI health_check request failed: {exc}") from exc
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("FEAGI health_check returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("FEAGI health_check response must be a JSON object.")
+
+    timestep = payload.get("simulation_timestep")
+    if not isinstance(timestep, (int, float)):
+        raise RuntimeError("FEAGI health_check missing numeric simulation_timestep.")
+    timestep = float(timestep)
+    if not np.isfinite(timestep) or timestep <= 0.0:
+        raise RuntimeError(f"FEAGI health_check returned invalid simulation_timestep={timestep}")
+    return 1.0 / timestep
+
+
+def _set_feagi_simulation_rate_hz(
+    feagi_host: str,
+    feagi_api_port: int,
+    feagi_http_timeout_s: float,
+    requested_rate_hz: float,
+) -> None:
+    """Request FEAGI simulation timestep update for target rate."""
+    if not np.isfinite(requested_rate_hz) or requested_rate_hz <= 0.0:
+        raise RuntimeError(f"Requested rate must be > 0 Hz, got {requested_rate_hz}")
+    timestep = 1.0 / float(requested_rate_hz)
+    endpoint = _simulation_timestep_url(feagi_host, feagi_api_port)
+    body = json.dumps({"simulation_timestep": timestep}).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=feagi_http_timeout_s):
+            pass
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"FEAGI simulation_timestep update failed: {exc}") from exc
+
+
+def _enforce_feagi_model_rate_strict(
+    model,
+    feagi_host: str,
+    feagi_api_port: int,
+    feagi_http_timeout_s: float,
+) -> None:
+    """
+    Strictly enforce FEAGI burst-engine timestep from MuJoCo model timestep.
+
+    Fails startup if FEAGI cannot be updated to the model-requested rate.
+    """
+    model_timestep = float(model.opt.timestep)
+    if not np.isfinite(model_timestep) or model_timestep <= 0.0:
+        raise RuntimeError(
+            f"MuJoCo model has invalid timestep={model_timestep}; cannot negotiate FEAGI rate."
+        )
+    requested_rate_hz = 1.0 / model_timestep
+    logger.info(
+        "[RATE] Model timestep=%.8f requested_rate_hz=%.2f",
+        model_timestep,
+        requested_rate_hz,
+    )
+
+    current_rate_hz = _read_feagi_simulation_rate_hz(
+        feagi_host,
+        feagi_api_port,
+        feagi_http_timeout_s,
+    )
+    logger.info("[RATE] FEAGI current effective rate=%.2f Hz", current_rate_hz)
+    rate_epsilon_hz = 0.01
+    if abs(current_rate_hz - requested_rate_hz) <= rate_epsilon_hz:
+        logger.info("[RATE] FEAGI rate already matches model request.")
+        return
+
+    logger.info("[RATE] Updating FEAGI rate to %.2f Hz...", requested_rate_hz)
+    _set_feagi_simulation_rate_hz(
+        feagi_host,
+        feagi_api_port,
+        feagi_http_timeout_s,
+        requested_rate_hz,
+    )
+    updated_rate_hz = _read_feagi_simulation_rate_hz(
+        feagi_host,
+        feagi_api_port,
+        feagi_http_timeout_s,
+    )
+    if abs(updated_rate_hz - requested_rate_hz) > rate_epsilon_hz:
+        raise RuntimeError(
+            "FEAGI rate mismatch after update: "
+            f"requested={requested_rate_hz:.2f}Hz actual={updated_rate_hz:.2f}Hz"
+        )
+    logger.info(
+        "[RATE] FEAGI simulation rate enforced at %.2f Hz (timestep=%.8f).",
+        updated_rate_hz,
+        1.0 / updated_rate_hz,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generic MuJoCo Controller for FEAGI")
     # Network config must be explicit (no defaults).
@@ -1710,6 +1835,19 @@ def main():
         logger.info(f"[OK] Model loaded: {model.nq} DOF, {model.nu} actuators")
     except Exception as e:
         logger.info(f"[FAIL] Failed to load model '{model_load_path}': {e}")
+        if temp_model_dir and os.path.exists(temp_model_dir):
+            shutil.rmtree(temp_model_dir, ignore_errors=True)
+        return 1
+
+    try:
+        _enforce_feagi_model_rate_strict(
+            model,
+            args.ip,
+            args.port,
+            args.feagi_http_timeout_s,
+        )
+    except Exception as rate_error:
+        logger.info("[FAIL] FEAGI simulation rate negotiation failed: %s", rate_error)
         if temp_model_dir and os.path.exists(temp_model_dir):
             shutil.rmtree(temp_model_dir, ignore_errors=True)
         return 1
