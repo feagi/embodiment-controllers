@@ -16,7 +16,7 @@ The controller reads model-local mapping files and applies those labels during r
 
 - Mapping file is **per model**.
 - Mapping file lives in the **same folder as the model entry XML**:
-  - `.../embodiments/<mujoco_model>/model/mujoco_name_mappings.json`
+  - `.../embodiments/<mujoco_model>/model/mujoco_feagi_mappings.json`
 - Mapping is **explicit only** (exact key -> exact value).
 - No decoder-ring/token expansion fallback should be relied on.
 - If a key is absent, the controller falls back to the original MuJoCo name.
@@ -54,7 +54,7 @@ The controller reads model-local mapping files and applies those labels during r
 ## Workflow for a new model
 
 1. Identify the model entry XML (the file passed to `--model_xml`).
-2. Create `mujoco_name_mappings.json` in that entry XML folder.
+2. Create `mujoco_feagi_mappings.json` in that entry XML folder.
 3. Populate all four sections.
 4. Start with exact keys discovered from XML/runtime names.
 5. Replace cryptic keys with curated readable values.
@@ -82,7 +82,7 @@ The controller reads model-local mapping files and applies those labels during r
 ## Validation checklist
 
 - JSON parses successfully:
-  - `python3 -m json.tool /path/to/mujoco_name_mappings.json >/dev/null`
+  - `python3 -m json.tool /path/to/mujoco_feagi_mappings.json >/dev/null`
 - Controller can start with model and no mapping-load warning.
 - Hover/registration labels in BV show mapped values as expected.
 - No accidental fallback-only files for intended curated models.

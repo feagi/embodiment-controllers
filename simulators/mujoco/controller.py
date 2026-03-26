@@ -16,6 +16,7 @@ import argparse
 import logging
 import urllib.error
 import urllib.request
+import importlib.metadata
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 import numpy as np
@@ -37,7 +38,40 @@ logger = logging.getLogger("mujoco_controller")
 # Configuration
 RUNTIME = float('inf')
 SPEED = 120
-NAME_MAPPING_FILENAME = "mujoco_name_mappings.json"
+NAME_MAPPING_FILENAME = "mujoco_feagi_mappings.json"
+
+
+def _resolve_controller_version_info() -> tuple[str, int | None]:
+    """Resolve controller bundle version/build from local manifest when available."""
+    manifest_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "manifest.json",
+    )
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+            manifest_payload = json.load(manifest_file)
+        bundle = manifest_payload.get("bundle", {})
+        bundle_version = str(bundle.get("version", "unknown"))
+        build_number_raw = bundle.get("build_number")
+        build_number = int(build_number_raw) if build_number_raw is not None else None
+        return bundle_version, build_number
+    except Exception:
+        return "unknown", None
+
+
+def _resolve_feagi_sdk_version() -> str:
+    """Resolve installed FEAGI Python SDK version."""
+    try:
+        return importlib.metadata.version("feagi-core")
+    except importlib.metadata.PackageNotFoundError:
+        try:
+            return importlib.metadata.version("feagi")
+        except importlib.metadata.PackageNotFoundError:
+            return "unknown"
+        except Exception:
+            return "unknown"
+    except Exception:
+        return "unknown"
 
 
 @dataclass(frozen=True)
@@ -51,6 +85,8 @@ class MujocoNameTranslator:
     source_entities: dict[str, str]
     incremental_step_ratios: dict[str, float]
     motor_control_contracts: dict[str, dict[str, Any]]
+    vision_camera_overrides: list[str]
+    vision_peripheral_resolution: Optional[tuple[int, int]]
 
     def translate_joint(self, joint_name: str) -> str:
         return self.model_joints.get(joint_name, joint_name)
@@ -96,6 +132,16 @@ class MujocoNameTranslator:
                     return contract
         return {}
 
+    def get_vision_camera_overrides(self) -> list[str]:
+        """Return configured explicit vision camera list (ordered, unique)."""
+        return list(self.vision_camera_overrides)
+
+    def get_vision_peripheral_resolution(self) -> Optional[tuple[int, int]]:
+        """Return optional per-model peripheral segmented vision resolution."""
+        if self.vision_peripheral_resolution is None:
+            return None
+        return tuple(self.vision_peripheral_resolution)
+
 
 def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
     """Load optional per-model mapping table next to the model XML entry file."""
@@ -109,6 +155,8 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         source_entities={},
         incremental_step_ratios={},
         motor_control_contracts={},
+        vision_camera_overrides=[],
+        vision_peripheral_resolution=None,
     )
     if not os.path.isfile(mapping_path):
         logger.info("[NAME_MAP] No per-model mapping found at %s", mapping_path)
@@ -126,6 +174,8 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
     source_entities = payload.get("source_entities", {})
     raw_incremental_step_ratios = payload.get("incremental_step_ratios", {})
     raw_motor_control_contracts = payload.get("motor_control_contracts", {})
+    raw_vision_camera_overrides = payload.get("vision_camera_overrides", [])
+    raw_vision_peripheral_resolution = payload.get("vision_peripheral_resolution")
     incremental_step_ratios: dict[str, float] = {}
     if isinstance(raw_incremental_step_ratios, dict):
         for key, value in raw_incremental_step_ratios.items():
@@ -167,6 +217,31 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
                     parsed_contract["incremental_step_ratio"] = ratio_f
             if parsed_contract:
                 motor_control_contracts[key] = parsed_contract
+    vision_camera_overrides: list[str] = []
+    if isinstance(raw_vision_camera_overrides, list):
+        seen_overrides: set[str] = set()
+        for entry in raw_vision_camera_overrides:
+            if not isinstance(entry, str):
+                continue
+            camera_name = _sanitize_name(entry)
+            if not camera_name:
+                continue
+            lowered = camera_name.lower()
+            if lowered in seen_overrides:
+                continue
+            seen_overrides.add(lowered)
+            vision_camera_overrides.append(camera_name)
+    vision_peripheral_resolution: Optional[tuple[int, int]] = None
+    if (
+        isinstance(raw_vision_peripheral_resolution, list)
+        and len(raw_vision_peripheral_resolution) == 2
+    ):
+        width_raw, height_raw = raw_vision_peripheral_resolution
+        if isinstance(width_raw, (int, float)) and isinstance(height_raw, (int, float)):
+            width = int(width_raw)
+            height = int(height_raw)
+            if width > 0 and height > 0:
+                vision_peripheral_resolution = (width, height)
 
     translator = MujocoNameTranslator(
         mapping_path=mapping_path,
@@ -176,9 +251,11 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         source_entities=source_entities if isinstance(source_entities, dict) else {},
         incremental_step_ratios=incremental_step_ratios,
         motor_control_contracts=motor_control_contracts,
+        vision_camera_overrides=vision_camera_overrides,
+        vision_peripheral_resolution=vision_peripheral_resolution,
     )
     logger.info(
-        "[NAME_MAP] Loaded per-model mappings from %s (joints=%d actuators=%d sensors=%d sources=%d incremental_scales=%d contracts=%d)",
+        "[NAME_MAP] Loaded per-model mappings from %s (joints=%d actuators=%d sensors=%d sources=%d incremental_scales=%d contracts=%d vision_overrides=%d)",
         mapping_path,
         len(translator.model_joints),
         len(translator.model_actuators),
@@ -186,6 +263,7 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         len(translator.source_entities),
         len(translator.incremental_step_ratios),
         len(translator.motor_control_contracts),
+        len(translator.vision_camera_overrides),
     )
     return translator
 
@@ -353,8 +431,11 @@ def _infer_ctrlrange(
 def _needs_ctrlrange_patch(actuator: ET.Element) -> bool:
     """True if actuator has no ctrlrange or ctrlrange is effectively [0,0]."""
     ctrl = actuator.get("ctrlrange", "").strip()
+    has_class_inheritance = bool((actuator.get("class") or "").strip())
     if not ctrl:
-        return True
+        # If actuator relies on a default class, ctrlrange may be inherited at
+        # compile time. Do not patch these from XML fallback heuristics.
+        return not has_class_inheritance
     parts = ctrl.split()
     if len(parts) < 2:
         return True
@@ -1070,7 +1151,7 @@ def _build_motor_registration_enricher(
     model_xml: str,
     group_names: list[str],
     group_channel_metadata: dict[int, dict[str, list[dict[str, str]]]],
-    sensor_registration_map: dict[str, list[SensorRegistration]],
+    sensory_registration_metadata: dict[str, list[SensorRegistration]],
 ) -> Callable[[dict], dict]:
     source_model = os.path.abspath(model_xml)
 
@@ -1168,44 +1249,62 @@ def _build_motor_registration_enricher(
 
         input_units = registrations.get("input_units_and_encoder_properties")
         if isinstance(input_units, dict):
-            for unit_key, unit_registrations in sorted(sensor_registration_map.items()):
-                entries = input_units.get(unit_key)
+            for unit_key, entries in sorted(input_units.items()):
                 if not isinstance(entries, list) or not entries:
                     continue
-                first_entry = entries[0]
-                if not isinstance(first_entry, list) or not first_entry:
-                    continue
-                unit_def = first_entry[0]
-                if not isinstance(unit_def, dict):
-                    continue
-                unit_def["friendly_name"] = unit_key.lower()
-                grouping = unit_def.get("device_grouping")
-                if not isinstance(grouping, list):
-                    continue
-                for index, channel in enumerate(grouping):
-                    if index >= len(unit_registrations):
-                        break
-                    if not isinstance(channel, dict):
+                unit_registrations = list(
+                    sensory_registration_metadata.get(str(unit_key), [])
+                )
+                metadata_cursor = 0
+                for unit_idx, entry in enumerate(entries):
+                    if not isinstance(entry, list) or not entry:
                         continue
-                    sensor = unit_registrations[index]
-                    channel["friendly_name"] = sensor.display_name
-                    device_properties = channel.get("device_properties")
-                    if not isinstance(device_properties, dict):
-                        device_properties = {}
-                    device_properties.update(
-                        {
-                            "bundle_type": sensor.bundle_type,
-                            "bundle_id": sensor.bundle_id,
-                            "modality": "sensory",
-                            "signal_type": _sensor_tag_to_signal_type(sensor.sensor_tag),
-                            "source_model": source_model,
-                            "source_entity": sensor.source_entity,
-                            "sensor_name": sensor.sensor_name,
-                            "sensor_tag": sensor.sensor_tag,
-                            "naming_schema_version": "1",
-                        }
-                    )
-                    channel["device_properties"] = device_properties
+                    unit_def = entry[0]
+                    if not isinstance(unit_def, dict):
+                        continue
+                    grouping = unit_def.get("device_grouping")
+                    if not isinstance(grouping, list):
+                        continue
+                    unit_friendly_name = str(unit_key).lower()
+                    if metadata_cursor < len(unit_registrations):
+                        unit_friendly_name = unit_registrations[metadata_cursor].display_name
+                    elif len(entries) > 1:
+                        unit_friendly_name = f"{str(unit_key).lower()}_{unit_idx}"
+                    unit_def["friendly_name"] = unit_friendly_name
+                    for channel_idx, channel in enumerate(grouping):
+                        if not isinstance(channel, dict):
+                            continue
+                        sensor: Optional[SensorRegistration] = None
+                        if metadata_cursor < len(unit_registrations):
+                            sensor = unit_registrations[metadata_cursor]
+                        metadata_cursor += 1
+                        if sensor is None:
+                            sensor = SensorRegistration(
+                                sensor_name=f"{str(unit_key).lower()}_{unit_idx}_{channel_idx}",
+                                display_name=f"{str(unit_key).lower()}_{unit_idx}_{channel_idx}",
+                                sensor_tag=str(unit_key).lower(),
+                                bundle_id=f"{str(unit_key).lower()}_{unit_idx}",
+                                bundle_type="sensor_array",
+                                source_entity=f"{str(unit_key).lower()}_{unit_idx}",
+                            )
+                        channel["friendly_name"] = sensor.display_name
+                        device_properties = channel.get("device_properties")
+                        if not isinstance(device_properties, dict):
+                            device_properties = {}
+                        device_properties.update(
+                            {
+                                "bundle_type": str(sensor.bundle_type),
+                                "bundle_id": str(sensor.bundle_id),
+                                "modality": "sensory",
+                                "signal_type": str(_sensor_tag_to_signal_type(sensor.sensor_tag)),
+                                "source_model": str(source_model),
+                                "source_entity": str(sensor.source_entity),
+                                "sensor_name": str(sensor.sensor_name),
+                                "sensor_tag": str(sensor.sensor_tag),
+                                "naming_schema_version": "1",
+                            }
+                        )
+                        channel["device_properties"] = device_properties
         return registrations
 
     return enrich
@@ -1213,6 +1312,7 @@ def _build_motor_registration_enricher(
 
 def register_mujoco_sensors_in_cache(
     sensor_registration_map: dict[str, list[SensorRegistration]],
+    group_index_start: int = 0,
 ) -> dict[str, int]:
     """Register MuJoCo sensors in cache via Python SDK abstractions."""
     unit_counts = {
@@ -1222,6 +1322,7 @@ def register_mujoco_sensors_in_cache(
     return brain_output.register_sensor_units(
         unit_counts,
         z_neuron_resolution=10,
+        group_index_start=group_index_start,
     )
 
 
@@ -1858,6 +1959,143 @@ def _enforce_feagi_model_rate_strict(
     )
 
 
+def _build_vision_units_from_model(
+    model,
+    name_translator: Optional[MujocoNameTranslator] = None,
+) -> tuple[list[tuple[str, int, int, int, str, int]], list[tuple[str, int, int]]]:
+    """
+    Build deterministic FEAGI vision units from MuJoCo camera metadata.
+
+    Register every camera mounted on the robot body subtree (not scene/world cameras)
+    as a separate FEAGI vision group.
+    """
+    if not (hasattr(model, "vis") and hasattr(model.vis, "global_")):
+        return [], []
+    # Standard FEAGI segmented vision input resolution.
+    # Segmentation topology is configured in SDK registration:
+    # center=128x128x3, peripheral=32x32x1.
+    render_width = 128
+    render_height = 128
+    nbody = int(getattr(model, "nbody", 0) or 0)
+    if nbody <= 1:
+        return [], []
+
+    body_parent = [int(model.body_parentid[i]) for i in range(nbody)]
+
+    def _ancestors(body_id: int) -> list[int]:
+        lineage: list[int] = []
+        cursor = int(body_id)
+        while cursor >= 0:
+            lineage.append(cursor)
+            if cursor == 0:
+                break
+            cursor = body_parent[cursor]
+        return lineage
+
+    candidate_body_ids = [
+        int(model.jnt_bodyid[joint_index])
+        for joint_index in range(int(getattr(model, "njnt", 0) or 0))
+        if int(model.jnt_type[joint_index]) != int(mujoco.mjtJoint.mjJNT_FREE)
+    ]
+    if not candidate_body_ids:
+        candidate_body_ids = [
+            int(model.jnt_bodyid[joint_index])
+            for joint_index in range(int(getattr(model, "njnt", 0) or 0))
+        ]
+    if not candidate_body_ids:
+        return [], []
+
+    first_lineage = _ancestors(candidate_body_ids[0])
+    common_ancestors = set(first_lineage)
+    for body_id in candidate_body_ids[1:]:
+        common_ancestors &= set(_ancestors(body_id))
+    if not common_ancestors:
+        return [], []
+    robot_root_body_id = next(
+        (body_id for body_id in first_lineage if body_id in common_ancestors),
+        0,
+    )
+
+    def _is_descendant(candidate_body_id: int, ancestor_body_id: int) -> bool:
+        cursor = int(candidate_body_id)
+        while cursor >= 0:
+            if cursor == ancestor_body_id:
+                return True
+            if cursor == 0:
+                break
+            cursor = body_parent[cursor]
+        return False
+
+    selected_cameras: list[tuple[str, int]] = []
+    ncam = int(getattr(model, "ncam", 0) or 0)
+    fixed_camera_mode = int(getattr(mujoco.mjtCamLight, "mjCAMLIGHT_FIXED", 0))
+    for camera_index in range(ncam):
+        camera_mode = int(model.cam_mode[camera_index])
+        # Mounted robot sensors should be fixed to their mount body; tracking
+        # cameras are scene/navigation views and must be excluded.
+        if camera_mode != fixed_camera_mode:
+            continue
+        camera_body_id = int(model.cam_bodyid[camera_index])
+        if camera_body_id <= 0:
+            continue
+        if not _is_descendant(camera_body_id, robot_root_body_id):
+            continue
+        try:
+            camera_name = _sanitize_name(
+                model.camera(camera_index).name or f"camera_{camera_index}"
+            )
+        except Exception:
+            camera_name = f"camera_{camera_index}"
+        selected_cameras.append((camera_name, camera_index))
+
+    selected_cameras.sort(key=lambda item: item[0])
+    if name_translator is not None:
+        override_names = [
+            name.lower() for name in name_translator.get_vision_camera_overrides()
+        ]
+        if override_names:
+            by_name = {name.lower(): (name, idx) for name, idx in selected_cameras}
+            override_selected: list[tuple[str, int]] = []
+            missing_override_names: list[str] = []
+            for override_name in override_names:
+                camera_entry = by_name.get(override_name)
+                if camera_entry is not None:
+                    override_selected.append(camera_entry)
+                else:
+                    missing_override_names.append(override_name)
+            if missing_override_names:
+                logger.warning(
+                    "[VISION][OVERRIDE] Requested cameras not detected on robot: %s",
+                    missing_override_names,
+                )
+            selected_cameras = override_selected
+    if not selected_cameras:
+        logger.warning(
+            "[VISION] No robot-mounted cameras selected for FEAGI vision registration."
+        )
+        return [], []
+    selected_camera_groups = [
+        (camera_name, camera_index, group_index)
+        for group_index, (camera_name, camera_index) in enumerate(selected_cameras)
+    ]
+    logger.info(
+        "[VISION] Selected cameras for FEAGI segmented vision: %s",
+        [
+            {
+                "name": camera_name,
+                "camera_index": camera_index,
+                "group": group_index,
+            }
+            for camera_name, camera_index, group_index in selected_camera_groups
+        ],
+    )
+    vision_units = [
+        ("camera", render_width, render_height, 3, "vision", group_index)
+        for group_index, _ in enumerate(selected_cameras)
+    ]
+    return vision_units, selected_camera_groups
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generic MuJoCo Controller for FEAGI")
     # Network config must be explicit (no defaults).
@@ -1954,6 +2192,22 @@ def main():
 
     logger.info("[START] Generic MuJoCo Controller (FEAGI Python SDK)")
     logger.info("[SRC] %s", os.path.abspath(__file__))
+    runtime_controller_version = os.path.basename(
+        os.path.dirname(os.path.abspath(__file__))
+    )
+    manifest_controller_version, manifest_build_number = _resolve_controller_version_info()
+    feagi_sdk_version = _resolve_feagi_sdk_version()
+    mujoco_version = getattr(mujoco, "__version__", "unknown")
+    logger.info(
+        "[VERSIONS] controller_runtime=%s controller_bundle=%s build=%s "
+        "python_sdk=%s mujoco=%s python=%s",
+        runtime_controller_version,
+        manifest_controller_version,
+        manifest_build_number if manifest_build_number is not None else "unknown",
+        feagi_sdk_version,
+        mujoco_version,
+        sys.version.split()[0],
+    )
     try:
         import feagi.pns.client as feagi_client_module
         import feagi.pns.xyzp_decoders as feagi_xyzp_module
@@ -1986,19 +2240,6 @@ def main():
             shutil.rmtree(temp_model_dir, ignore_errors=True)
         return 1
 
-    try:
-        _enforce_feagi_model_rate_strict(
-            model,
-            args.ip,
-            args.port,
-            args.feagi_http_timeout_s,
-        )
-    except Exception as rate_error:
-        logger.info("[FAIL] FEAGI simulation rate negotiation failed: %s", rate_error)
-        if temp_model_dir and os.path.exists(temp_model_dir):
-            shutil.rmtree(temp_model_dir, ignore_errors=True)
-        return 1
-
     # Determine number of actuated joints (skip free joints)
     # Free joints have 7 DOF (3 position, 4 quaternion)
     free_joint_dofs = 0
@@ -2017,18 +2258,10 @@ def main():
         "[SAFETY] Joint-limit guards active for %d joints",
         len(joint_limit_guards),
     )
-    vision_unit: Optional[tuple[str, int, int, int, str, int]] = None
-    if hasattr(model, "vis") and hasattr(model.vis, "global_"):
-        render_width = int(max(1, int(model.vis.global_.offwidth)))
-        render_height = int(max(1, int(model.vis.global_.offheight)))
-        vision_unit = (
-            "camera",
-            render_width,
-            render_height,
-            3,
-            "vision",
-            0,
-        )
+    vision_units, selected_vision_cameras = _build_vision_units_from_model(
+        model,
+        name_translator,
+    )
     # Configure brain_output before registering motors. ServoMotor.register()
     # triggers brain_output._init_cache(), which requires agent_id to be set.
     logger.info(
@@ -2048,7 +2281,7 @@ def main():
         feagi_api_port=args.port,
         feagi_http_timeout_s=args.feagi_http_timeout_s,
         auth_token_b64=args.auth_token_b64,
-        vision_unit=vision_unit,
+        vision_units=vision_units,
     )
 
     # Register motors with FEAGI (uses brain_output cache; agent_id must already be set)
@@ -2057,11 +2290,73 @@ def main():
         model_load_path,
         name_translator=name_translator,
     )
+    supported_scalar_sensor_units = {"Proximity", "Shock", "MiscData"}
+    unsupported_registration_details: dict[str, list[str]] = {}
+    for unit_key, registrations in sensor_registration_map.items():
+        if unit_key in supported_scalar_sensor_units:
+            continue
+        unsupported_registration_details[unit_key] = sorted(
+            registration.sensor_name for registration in registrations
+        )
+    unsupported_registered_units = sorted(unsupported_registration_details.keys())
+    if unsupported_registered_units:
+        logger.warning(
+            "[SENSORY][UNSUPPORTED] Excluding unsupported FEAGI sensory units "
+            "from cache registration. Supported units=%s Unsupported units=%s",
+            sorted(supported_scalar_sensor_units),
+            unsupported_registered_units,
+        )
+        for unit_key in unsupported_registered_units:
+            skipped_sensors = unsupported_registration_details[unit_key]
+            logger.warning(
+                "[SENSORY][UNSUPPORTED][%s] skipped_channels=%d skipped_sensors=%s",
+                unit_key,
+                len(skipped_sensors),
+                skipped_sensors,
+            )
+    sensor_registration_map = {
+        unit_key: registrations
+        for unit_key, registrations in sensor_registration_map.items()
+        if unit_key in supported_scalar_sensor_units
+    }
+    sensory_registration_metadata = {
+        unit_key: list(registrations)
+        for unit_key, registrations in sensor_registration_map.items()
+    }
+    if selected_vision_cameras:
+        sensory_registration_metadata["Vision"] = [
+            SensorRegistration(
+                sensor_name=camera_name,
+                display_name=camera_name,
+                sensor_tag="camprojection",
+                bundle_id=camera_name,
+                bundle_type="camera_rig",
+                source_entity=camera_name,
+            )
+            for camera_name, _camera_index, _group_index in selected_vision_cameras
+        ]
+    supported_sensor_names = {
+        registration.sensor_name
+        for registrations in sensor_registration_map.values()
+        for registration in registrations
+    }
+    runtime_sensor_channels = [
+        channel
+        for channel in runtime_sensor_channels
+        if channel.sensor_name in supported_sensor_names
+    ]
+    logger.info(
+        "[SENSORY][SUPPORTED] Registered FEAGI sensory cache units=%s total_channels=%d",
+        sorted(sensor_registration_map.keys()),
+        sum(len(registrations) for registrations in sensor_registration_map.values()),
+    )
     runtime_channel_by_name = {
         channel.sensor_name: channel for channel in runtime_sensor_channels
     }
+    sensor_group_index_start = len(vision_units)
     sensor_cache_channel_layout: list[tuple[str, int, int, RuntimeSensorChannel]] = []
-    for group_index, unit_key in enumerate(sorted(sensor_registration_map.keys())):
+    for group_offset, unit_key in enumerate(sorted(sensor_registration_map.keys())):
+        group_index = sensor_group_index_start + group_offset
         registrations = sensor_registration_map[unit_key]
         for channel_index, registration in enumerate(registrations):
             channel = runtime_channel_by_name.get(registration.sensor_name)
@@ -2096,7 +2391,7 @@ def main():
             model_load_path,
             group_names,
             group_channel_metadata,
-            sensor_registration_map,
+            sensory_registration_metadata,
         )
     )
     logger.info("[MAP] Registered motor-channel mapping:")
@@ -2142,7 +2437,30 @@ def main():
             # never reflect the true number of joints.
             try:
                 # Register sensory and motor layouts via SDK wrappers.
-                register_mujoco_sensors_in_cache(sensor_registration_map)
+                if vision_units:
+                    peripheral_resolution = None
+                    if name_translator is not None:
+                        peripheral_resolution = (
+                            name_translator.get_vision_peripheral_resolution()
+                        )
+                    vision_groups = brain_output.register_vision_groups(
+                        vision_units,
+                        peripheral_resolution=peripheral_resolution,
+                    )
+                    logger.info(
+                        "[VISION] Registered %d vision cache group(s): %s",
+                        len(vision_groups),
+                        vision_groups,
+                    )
+                scalar_sensor_groups = register_mujoco_sensors_in_cache(
+                    sensor_registration_map,
+                    group_index_start=sensor_group_index_start,
+                )
+                logger.info(
+                    "[SENSORY] Registered scalar sensory cache groups with offset=%d: %s",
+                    sensor_group_index_start,
+                    scalar_sensor_groups,
+                )
                 brain_output.register_motor_groups(
                     group_channels,
                     z_neuron_resolution=10,
@@ -2159,6 +2477,18 @@ def main():
                 brain_output._collect_motor_cortical_ids = lambda: list(expected_motor_ids)
             brain_output.connect()
             logger.info("   [OK] Motor stream connected!")
+            try:
+                _enforce_feagi_model_rate_strict(
+                    model,
+                    args.ip,
+                    args.port,
+                    args.feagi_http_timeout_s,
+                )
+            except Exception as rate_error:
+                logger.info("[FAIL] FEAGI simulation rate negotiation failed: %s", rate_error)
+                if temp_model_dir and os.path.exists(temp_model_dir):
+                    shutil.rmtree(temp_model_dir, ignore_errors=True)
+                return 1
             
         except Exception as e:
             logger.info(f"   [FAIL] FEAGI connection failed: {e}")
@@ -2190,6 +2520,7 @@ def main():
 
         start_time = time.time()
         frame_number = 0
+        last_sim_time = float(data.time)
         motor_telemetry_state: dict[tuple[int, int], dict[str, float]] = {}
         last_motor_snapshot: dict[str, float] = {}
         motor_channel_labels: dict[tuple[int, int], str] = {
@@ -2211,11 +2542,60 @@ def main():
         window_changed_samples = 0
         window_changed_channels: set[tuple[int, int]] = set()
         window_group_stats: dict[int, dict[str, float]] = {}
+        runtime_unsupported_unit_write_failures: dict[str, int] = {}
+        vision_renderer = None
+        if vision_units and selected_vision_cameras:
+            _modality, vision_width, vision_height, _channels, _unit, _group = vision_units[0]
+            try:
+                vision_renderer = mujoco.Renderer(
+                    model,
+                    int(vision_height),
+                    int(vision_width),
+                )
+                logger.info(
+                    "[VISION] Vision frame rendering active: cameras=%d resolution=%dx%d",
+                    len(selected_vision_cameras),
+                    int(vision_width),
+                    int(vision_height),
+                )
+            except Exception as vision_renderer_error:
+                logger.warning(
+                    "[VISION][DISABLED] Failed to initialize renderer: %s",
+                    vision_renderer_error,
+                )
         window_joint_limit_corrections = 0
         window_joint_limit_joints: set[str] = set()
 
         while viewer.is_running() and time.time() - start_time < RUNTIME:
             step_start = time.time()
+            sim_reset_detected = float(data.time) + 1e-12 < last_sim_time
+            if sim_reset_detected:
+                logger.info("[VIEW] Simulation reset detected; clearing motor runtime state")
+                for (
+                    motor,
+                    _actuator_name,
+                    actuator_idx,
+                    min_val,
+                    max_val,
+                    _group_id,
+                    _channel_index,
+                    _device_type,
+                    _encoding,
+                ) in motors:
+                    neutral_ctrl = 0.0
+                    if isinstance(motor, ServoMotor):
+                        neutral_ctrl = (min_val + max_val) / 2.0
+                        if hasattr(motor, "_current_angle"):
+                            setattr(motor, "_current_angle", neutral_ctrl)
+                    elif isinstance(motor, RotaryMotor):
+                        neutral_ctrl = 0.0
+                        if hasattr(motor, "_current_speed"):
+                            setattr(motor, "_current_speed", 0.0)
+                    data.ctrl[actuator_idx] = neutral_ctrl
+                    if hasattr(motor, "_last_rx_mode"):
+                        setattr(motor, "_last_rx_mode", None)
+                motor_telemetry_state.clear()
+                last_motor_snapshot.clear()
 
             # Receive motor commands from FEAGI
             changed_in_tick = 0
@@ -2256,6 +2636,9 @@ def main():
                         _device_type,
                         _encoding,
                     ) in motors:
+                        state_key = (group_id, channel_index)
+                        prev_state = motor_telemetry_state.get(state_key, {})
+                        last_seen_rx_seq = getattr(motor, "_last_seen_rx_seq", -1)
                         norm_cmd = 0.0
                         applied_ctrl = 0.0
                         if isinstance(motor, ServoMotor):
@@ -2276,22 +2659,47 @@ def main():
 
                             rx_mode = getattr(motor, "_last_rx_mode", None)
                             rx_seq = getattr(motor, "_rx_command_seq", None)
+                            control_semantics = getattr(
+                                motor,
+                                "control_semantics",
+                                "normalized_position",
+                            )
                             is_incremental = rx_mode == "incremental"
-                            has_new_incremental = False
-                            if is_incremental and isinstance(rx_seq, int):
-                                state_key = (group_id, channel_index)
-                                prev = motor_telemetry_state.get(state_key, {})
-                                prev_seq = int(prev.get("last_rx_seq", -1.0))
-                                has_new_incremental = rx_seq != prev_seq
-                            if is_incremental and not has_new_incremental:
-                                # Incremental updates are event-like: hold neutral when no new packet.
-                                neutral_ctrl = center
-                                data.ctrl[actuator_idx] = neutral_ctrl
-                                applied_ctrl = neutral_ctrl
-                                norm_cmd = 0.0
+                            is_effort_absolute = (
+                                rx_mode == "absolute"
+                                and control_semantics == "normalized_effort_drive"
+                            )
+                            has_new_packet = isinstance(rx_seq, int) and rx_seq != int(last_seen_rx_seq)
+                            if (is_incremental and not has_new_packet) or (
+                                is_effort_absolute and not has_new_packet
+                            ):
+                                # Sparse command handling: hold the last applied target until
+                                # a new packet arrives. This keeps both absolute and incremental
+                                # control responsive under low-rate command streams.
+                                held_ctrl = float(
+                                    getattr(
+                                        motor,
+                                        "_latched_ctrl",
+                                        prev_state.get("last_applied_ctrl", center),
+                                    )
+                                )
+                                held_ctrl = max(min_val, min(max_val, held_ctrl))
+                                data.ctrl[actuator_idx] = held_ctrl
+                                applied_ctrl = held_ctrl
+                                if half_range > 0:
+                                    norm_cmd = _clamp(
+                                        (held_ctrl - center) / half_range,
+                                        -1.0,
+                                        1.0,
+                                    )
+                                else:
+                                    norm_cmd = 0.0
                             else:
                                 data.ctrl[actuator_idx] = angle
                                 applied_ctrl = angle
+                                setattr(motor, "_latched_ctrl", float(angle))
+                                if isinstance(rx_seq, int):
+                                    setattr(motor, "_last_seen_rx_seq", int(rx_seq))
                         elif isinstance(motor, RotaryMotor):
                             speed = motor.get_speed()
                             norm_cmd = _clamp(float(speed), -1.0, 1.0)
@@ -2300,25 +2708,43 @@ def main():
 
                             rx_mode = getattr(motor, "_last_rx_mode", None)
                             rx_seq = getattr(motor, "_rx_command_seq", None)
+                            control_semantics = getattr(
+                                motor,
+                                "control_semantics",
+                                "normalized_velocity",
+                            )
                             is_incremental = rx_mode == "incremental"
-                            has_new_incremental = False
-                            if is_incremental and isinstance(rx_seq, int):
-                                state_key = (group_id, channel_index)
-                                prev = motor_telemetry_state.get(state_key, {})
-                                prev_seq = int(prev.get("last_rx_seq", -1.0))
-                                has_new_incremental = rx_seq != prev_seq
-                            if is_incremental and not has_new_incremental:
-                                # Incremental updates are event-like: hold neutral when no new packet.
-                                data.ctrl[actuator_idx] = 0.0
-                                applied_ctrl = 0.0
-                                norm_cmd = 0.0
+                            is_effort_absolute = (
+                                rx_mode == "absolute"
+                                and control_semantics == "normalized_effort_drive"
+                            )
+                            has_new_packet = isinstance(rx_seq, int) and rx_seq != int(last_seen_rx_seq)
+                            if (is_incremental and not has_new_packet) or (
+                                is_effort_absolute and not has_new_packet
+                            ):
+                                # Sparse command handling: keep previous commanded speed.
+                                held_speed = _clamp(
+                                    float(
+                                        getattr(
+                                            motor,
+                                            "_latched_ctrl",
+                                            prev_state.get("last_applied_ctrl", 0.0),
+                                        )
+                                    ),
+                                    -1.0,
+                                    1.0,
+                                )
+                                data.ctrl[actuator_idx] = held_speed
+                                applied_ctrl = held_speed
+                                norm_cmd = held_speed
                             else:
                                 data.ctrl[actuator_idx] = speed
                                 applied_ctrl = speed
+                                setattr(motor, "_latched_ctrl", float(speed))
+                                if isinstance(rx_seq, int):
+                                    setattr(motor, "_last_seen_rx_seq", int(rx_seq))
                         else:
                             continue
-
-                        state_key = (group_id, channel_index)
                         state = motor_telemetry_state.setdefault(
                             state_key,
                             {
@@ -2387,12 +2813,51 @@ def main():
                         if was_changed:
                             stats["changed"] += 1.0
 
+                    sensory_samples_written = 0
+
+                    if vision_renderer is not None:
+                        for (
+                            camera_name,
+                            camera_index,
+                            group_index,
+                        ) in selected_vision_cameras:
+                            vision_frame = None
+                            try:
+                                vision_renderer.update_scene(data, camera=int(camera_index))
+                                vision_frame = vision_renderer.render()
+                            except Exception as vision_frame_error:
+                                if frame_number % 240 == 0:
+                                    logger.warning(
+                                        "[VISION][SKIP][%s] render_failed=%s",
+                                        camera_name,
+                                        vision_frame_error,
+                                    )
+                                continue
+                            try:
+                                brain_output.write_sensor_vision_frame(
+                                    group=group_index,
+                                    channel_index=0,
+                                    frame_rgb=vision_frame,
+                                )
+                                sensory_samples_written += 1
+                            except Exception as vision_write_error:
+                                if frame_number % 240 == 0:
+                                    logger.warning(
+                                        "[VISION][SKIP][%s] cache_write_failed=%s",
+                                        camera_name,
+                                        vision_write_error,
+                                    )
+
                     if runtime_sensor_channels:
                         unsupported_units: set[str] = set()
+                        writable_units = supported_scalar_sensor_units
 
                         for unit_key, group_index, channel_index, sensor_channel in (
                             sensor_cache_channel_layout
                         ):
+                            if unit_key not in writable_units:
+                                unsupported_units.add(unit_key)
+                                continue
                             raw_value = _read_runtime_channel_sample(
                                 data,
                                 sensor_channel,
@@ -2415,15 +2880,24 @@ def main():
                                     channel_index=channel_index,
                                     scalar_0_1=scalar_0_1,
                                 )
+                                sensory_samples_written += 1
                             except ValueError:
                                 unsupported_units.add(unit_key)
+                                runtime_unsupported_unit_write_failures[unit_key] = (
+                                    runtime_unsupported_unit_write_failures.get(unit_key, 0)
+                                    + 1
+                                )
 
-                        if unsupported_units and frame_number % 240 == 0:
-                            logger.info(
-                                "[SENSORY] Skipping unsupported cache write units: %s",
-                                sorted(unsupported_units),
-                            )
+                        if unsupported_units:
+                            for unit_key in sorted(unsupported_units):
+                                logger.warning(
+                                    "[SENSORY][SKIP-WRITE][%s] skipped_writes=%d "
+                                    "reason='unit not supported by scalar sensory cache'",
+                                    unit_key,
+                                    runtime_unsupported_unit_write_failures.get(unit_key, 0),
+                                )
 
+                    if sensory_samples_written > 0:
                         brain_output.flush_sensory_bytes()
                 except Exception as e:
                     if frame_number % 120 == 0:
@@ -2635,6 +3109,7 @@ def main():
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+            last_sim_time = float(data.time)
             frame_number += 1
 
         logger.info("\n[STOP] Simulation ended")
