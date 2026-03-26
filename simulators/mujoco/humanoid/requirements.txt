@@ -7,5 +7,5 @@ feagi @ git+https://github.com/feagi/feagi.git@staging
 # feagi>=2.0.0
 
 # MuJoCo physics simulator
-mujoco==3.2.3
+mujoco==3.6.0
 numpy==1.26.4

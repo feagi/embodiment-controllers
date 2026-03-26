@@ -54,7 +54,7 @@
     "dependencies": {
       "system": [],
       "python": [
-        "mujoco==3.2.3",
+        "mujoco==3.6.0",
         "numpy==1.26.4",
         "feagi-core>=2.1.33"
       ]

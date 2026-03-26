@@ -48,7 +48,7 @@ else
 fi
 
 echo "[PIP] Installing dependencies..."
-"$VENV_PIP" install "feagi-core>=2.1.33" "mujoco==3.2.3" "numpy==1.26.4" -q
+"$VENV_PIP" install "feagi-core>=2.1.33" "mujoco==3.6.0" "numpy==1.26.4" -q
 
 echo "[VERIFY] Checking imports..."
 "$VENV_PY" -c "import feagi; import mujoco; from feagi.pns import brain_output; print('OK')"

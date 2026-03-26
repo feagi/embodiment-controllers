@@ -1,2 +1,2 @@
 feagi-connector>=0.0.33
-mujoco==3.2.3
+mujoco==3.6.0
