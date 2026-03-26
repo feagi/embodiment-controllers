@@ -27,6 +27,8 @@ from feagi.pns.outputs import ServoMotor, RotaryMotor
 from feagi.pns import brain_output
 import inspect
 
+from motor_ephemeral_utils import motor_rx_is_new_packet as _motor_rx_is_new_packet
+
 
 # Standard logger (keeps controller compatible with released feagi SDK wheels)
 logging.basicConfig(
@@ -2637,112 +2639,59 @@ def main():
                         _encoding,
                     ) in motors:
                         state_key = (group_id, channel_index)
-                        prev_state = motor_telemetry_state.get(state_key, {})
                         last_seen_rx_seq = getattr(motor, "_last_seen_rx_seq", -1)
                         norm_cmd = 0.0
                         applied_ctrl = 0.0
                         if isinstance(motor, ServoMotor):
-                            angle = motor.get_angle()
                             center = (min_val + max_val) / 2.0
                             half_range = (max_val - min_val) / 2.0
-                            if half_range > 0:
-                                norm_cmd = _clamp(
-                                    (angle - center) / half_range,
-                                    -1.0,
-                                    1.0,
-                                )
-                            # Apply gain in controller (SDK version compatibility:
-                            # ServoMotor.register may not support gain)
-                            if args.motor_gain != 1.0:
-                                angle = center + ((angle - center) * args.motor_gain)
-                                angle = max(min_val, min(max_val, angle))
-
-                            rx_mode = getattr(motor, "_last_rx_mode", None)
                             rx_seq = getattr(motor, "_rx_command_seq", None)
-                            control_semantics = getattr(
-                                motor,
-                                "control_semantics",
-                                "normalized_position",
+                            has_new_packet = _motor_rx_is_new_packet(
+                                rx_seq, int(last_seen_rx_seq)
                             )
-                            is_incremental = rx_mode == "incremental"
-                            is_effort_absolute = (
-                                rx_mode == "absolute"
-                                and control_semantics == "normalized_effort_drive"
-                            )
-                            has_new_packet = isinstance(rx_seq, int) and rx_seq != int(last_seen_rx_seq)
-                            if (is_incremental and not has_new_packet) or (
-                                is_effort_absolute and not has_new_packet
-                            ):
-                                # Sparse command handling: hold the last applied target until
-                                # a new packet arrives. This keeps both absolute and incremental
-                                # control responsive under low-rate command streams.
-                                held_ctrl = float(
-                                    getattr(
-                                        motor,
-                                        "_latched_ctrl",
-                                        prev_state.get("last_applied_ctrl", center),
-                                    )
-                                )
-                                held_ctrl = max(min_val, min(max_val, held_ctrl))
-                                data.ctrl[actuator_idx] = held_ctrl
-                                applied_ctrl = held_ctrl
+                            # Ephemeral orders: apply FEAGI output only on the tick that sees a
+                            # new motor packet; otherwise neutral ctrl (no hold / no delay).
+                            if has_new_packet:
+                                angle = motor.get_angle()
+                                # Apply gain in controller (SDK version compatibility:
+                                # ServoMotor.register may not support gain)
+                                if args.motor_gain != 1.0:
+                                    angle = center + ((angle - center) * args.motor_gain)
+                                    angle = max(min_val, min(max_val, angle))
+                                data.ctrl[actuator_idx] = angle
+                                applied_ctrl = angle
+                                setattr(motor, "_last_seen_rx_seq", int(rx_seq))
                                 if half_range > 0:
                                     norm_cmd = _clamp(
-                                        (held_ctrl - center) / half_range,
+                                        (angle - center) / half_range,
                                         -1.0,
                                         1.0,
                                     )
                                 else:
                                     norm_cmd = 0.0
                             else:
-                                data.ctrl[actuator_idx] = angle
-                                applied_ctrl = angle
-                                setattr(motor, "_latched_ctrl", float(angle))
-                                if isinstance(rx_seq, int):
-                                    setattr(motor, "_last_seen_rx_seq", int(rx_seq))
+                                neutral_ctrl = center
+                                data.ctrl[actuator_idx] = neutral_ctrl
+                                applied_ctrl = neutral_ctrl
+                                norm_cmd = 0.0
                         elif isinstance(motor, RotaryMotor):
-                            speed = motor.get_speed()
-                            norm_cmd = _clamp(float(speed), -1.0, 1.0)
-                            if args.motor_gain != 1.0:
-                                speed = max(-1.0, min(1.0, speed * args.motor_gain))
-
-                            rx_mode = getattr(motor, "_last_rx_mode", None)
                             rx_seq = getattr(motor, "_rx_command_seq", None)
-                            control_semantics = getattr(
-                                motor,
-                                "control_semantics",
-                                "normalized_velocity",
+                            has_new_packet = _motor_rx_is_new_packet(
+                                rx_seq, int(last_seen_rx_seq)
                             )
-                            is_incremental = rx_mode == "incremental"
-                            is_effort_absolute = (
-                                rx_mode == "absolute"
-                                and control_semantics == "normalized_effort_drive"
-                            )
-                            has_new_packet = isinstance(rx_seq, int) and rx_seq != int(last_seen_rx_seq)
-                            if (is_incremental and not has_new_packet) or (
-                                is_effort_absolute and not has_new_packet
-                            ):
-                                # Sparse command handling: keep previous commanded speed.
-                                held_speed = _clamp(
-                                    float(
-                                        getattr(
-                                            motor,
-                                            "_latched_ctrl",
-                                            prev_state.get("last_applied_ctrl", 0.0),
-                                        )
-                                    ),
-                                    -1.0,
-                                    1.0,
-                                )
-                                data.ctrl[actuator_idx] = held_speed
-                                applied_ctrl = held_speed
-                                norm_cmd = held_speed
-                            else:
+                            if has_new_packet:
+                                speed = motor.get_speed()
+                                if args.motor_gain != 1.0:
+                                    speed = max(-1.0, min(1.0, speed * args.motor_gain))
                                 data.ctrl[actuator_idx] = speed
                                 applied_ctrl = speed
-                                setattr(motor, "_latched_ctrl", float(speed))
-                                if isinstance(rx_seq, int):
-                                    setattr(motor, "_last_seen_rx_seq", int(rx_seq))
+                                setattr(motor, "_last_seen_rx_seq", int(rx_seq))
+                                norm_cmd = _clamp(float(speed), -1.0, 1.0)
+                            else:
+                                neutral_speed = 0.0
+                                data.ctrl[actuator_idx] = neutral_speed
+                                applied_ctrl = neutral_speed
+                                norm_cmd = 0.0
                         else:
                             continue
                         state = motor_telemetry_state.setdefault(
