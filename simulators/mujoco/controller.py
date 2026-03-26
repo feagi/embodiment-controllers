@@ -49,6 +49,8 @@ class MujocoNameTranslator:
     model_actuators: dict[str, str]
     model_sensors: dict[str, str]
     source_entities: dict[str, str]
+    incremental_step_ratios: dict[str, float]
+    motor_control_contracts: dict[str, dict[str, Any]]
 
     def translate_joint(self, joint_name: str) -> str:
         return self.model_joints.get(joint_name, joint_name)
@@ -68,6 +70,32 @@ class MujocoNameTranslator:
             return self.translate_actuator(name)
         return name
 
+    def incremental_step_ratio_for(
+        self,
+        actuator_name: str,
+        joint_name: str,
+        source_entity: str,
+    ) -> Optional[float]:
+        """Resolve optional per-channel incremental step ratio from mapping table."""
+        for key in (actuator_name, joint_name, source_entity):
+            if key and key in self.incremental_step_ratios:
+                return self.incremental_step_ratios[key]
+        return None
+
+    def motor_contract_for(
+        self,
+        actuator_name: str,
+        joint_name: str,
+        source_entity: str,
+    ) -> dict[str, Any]:
+        """Resolve optional per-channel motor control contract from mapping table."""
+        for key in (actuator_name, joint_name, source_entity):
+            if key and key in self.motor_control_contracts:
+                contract = self.motor_control_contracts.get(key)
+                if isinstance(contract, dict):
+                    return contract
+        return {}
+
 
 def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
     """Load optional per-model mapping table next to the model XML entry file."""
@@ -79,6 +107,8 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         model_actuators={},
         model_sensors={},
         source_entities={},
+        incremental_step_ratios={},
+        motor_control_contracts={},
     )
     if not os.path.isfile(mapping_path):
         logger.info("[NAME_MAP] No per-model mapping found at %s", mapping_path)
@@ -94,6 +124,49 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
     model_actuators = payload.get("actuators", {})
     model_sensors = payload.get("sensors", {})
     source_entities = payload.get("source_entities", {})
+    raw_incremental_step_ratios = payload.get("incremental_step_ratios", {})
+    raw_motor_control_contracts = payload.get("motor_control_contracts", {})
+    incremental_step_ratios: dict[str, float] = {}
+    if isinstance(raw_incremental_step_ratios, dict):
+        for key, value in raw_incremental_step_ratios.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                ratio = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(ratio) or ratio <= 0.0:
+                continue
+            incremental_step_ratios[key] = ratio
+    motor_control_contracts: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_motor_control_contracts, dict):
+        for key, raw_contract in raw_motor_control_contracts.items():
+            if not isinstance(key, str) or not isinstance(raw_contract, dict):
+                continue
+            parsed_contract: dict[str, Any] = {}
+            semantics = raw_contract.get("control_semantics")
+            if isinstance(semantics, str) and semantics:
+                parsed_contract["control_semantics"] = semantics
+            version = raw_contract.get("contract_version")
+            if isinstance(version, str) and version:
+                parsed_contract["contract_version"] = version
+            absolute_scale = raw_contract.get("absolute_command_scale")
+            if isinstance(absolute_scale, (int, float)):
+                absolute_scale_f = float(absolute_scale)
+                if np.isfinite(absolute_scale_f) and absolute_scale_f >= 0.0:
+                    parsed_contract["absolute_command_scale"] = absolute_scale_f
+            incremental_scale = raw_contract.get("incremental_command_scale")
+            if isinstance(incremental_scale, (int, float)):
+                incremental_scale_f = float(incremental_scale)
+                if np.isfinite(incremental_scale_f) and incremental_scale_f >= 0.0:
+                    parsed_contract["incremental_command_scale"] = incremental_scale_f
+            ratio = raw_contract.get("incremental_step_ratio")
+            if isinstance(ratio, (int, float)):
+                ratio_f = float(ratio)
+                if np.isfinite(ratio_f) and ratio_f > 0.0:
+                    parsed_contract["incremental_step_ratio"] = ratio_f
+            if parsed_contract:
+                motor_control_contracts[key] = parsed_contract
 
     translator = MujocoNameTranslator(
         mapping_path=mapping_path,
@@ -101,14 +174,18 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         model_actuators=model_actuators if isinstance(model_actuators, dict) else {},
         model_sensors=model_sensors if isinstance(model_sensors, dict) else {},
         source_entities=source_entities if isinstance(source_entities, dict) else {},
+        incremental_step_ratios=incremental_step_ratios,
+        motor_control_contracts=motor_control_contracts,
     )
     logger.info(
-        "[NAME_MAP] Loaded per-model mappings from %s (joints=%d actuators=%d sensors=%d sources=%d)",
+        "[NAME_MAP] Loaded per-model mappings from %s (joints=%d actuators=%d sensors=%d sources=%d incremental_scales=%d contracts=%d)",
         mapping_path,
         len(translator.model_joints),
         len(translator.model_actuators),
         len(translator.model_sensors),
         len(translator.source_entities),
+        len(translator.incremental_step_ratios),
+        len(translator.motor_control_contracts),
     )
     return translator
 
@@ -1066,6 +1143,27 @@ def _build_motor_registration_enricher(
                             "naming_schema_version": "1",
                         }
                     )
+                    incremental_step_ratio = metadata.get("incremental_step_ratio")
+                    if isinstance(incremental_step_ratio, (int, float)):
+                        device_properties["incremental_step_ratio"] = float(
+                            incremental_step_ratio
+                        )
+                    control_semantics = metadata.get("control_semantics")
+                    if isinstance(control_semantics, str) and control_semantics:
+                        device_properties["control_semantics"] = control_semantics
+                    contract_version = metadata.get("contract_version")
+                    if isinstance(contract_version, str) and contract_version:
+                        device_properties["contract_version"] = contract_version
+                    absolute_command_scale = metadata.get("absolute_command_scale")
+                    if isinstance(absolute_command_scale, (int, float)):
+                        device_properties["absolute_command_scale"] = float(
+                            absolute_command_scale
+                        )
+                    incremental_command_scale = metadata.get("incremental_command_scale")
+                    if isinstance(incremental_command_scale, (int, float)):
+                        device_properties["incremental_command_scale"] = float(
+                            incremental_command_scale
+                        )
                     channel["device_properties"] = device_properties
 
         input_units = registrations.get("input_units_and_encoder_properties")
@@ -1336,6 +1434,31 @@ def register_mujoco_motors(
                 # Tendon actuators may reference multiple joints internally, but
                 # one cortical channel should map to one display identity in BV.
                 source_entity = joint_name or actuator_name
+                motor_contract = (
+                    name_translator.motor_contract_for(
+                        actuator_name=actuator_name,
+                        joint_name=joint_name,
+                        source_entity=source_entity,
+                    )
+                    if name_translator is not None
+                    else {}
+                )
+                incremental_step_ratio = (
+                    name_translator.incremental_step_ratio_for(
+                        actuator_name=actuator_name,
+                        joint_name=joint_name,
+                        source_entity=source_entity,
+                    )
+                    if name_translator is not None
+                    else None
+                )
+                contract_incremental_ratio = motor_contract.get("incremental_step_ratio")
+                if isinstance(contract_incremental_ratio, (int, float)):
+                    incremental_step_ratio = float(contract_incremental_ratio)
+                control_semantics = motor_contract.get("control_semantics")
+                contract_version = motor_contract.get("contract_version")
+                absolute_command_scale = motor_contract.get("absolute_command_scale")
+                incremental_command_scale = motor_contract.get("incremental_command_scale")
                 display_source_entity = source_entity
                 if name_translator is not None:
                     if joint_name:
@@ -1350,6 +1473,14 @@ def register_mujoco_motors(
                         unit_id=group_id,
                         channel_index=channel_index,
                     )
+                    if incremental_step_ratio is not None and hasattr(motor, "incremental_step_ratio"):
+                        setattr(motor, "incremental_step_ratio", incremental_step_ratio)
+                    if isinstance(control_semantics, str) and control_semantics and hasattr(motor, "control_semantics"):
+                        setattr(motor, "control_semantics", control_semantics)
+                    if isinstance(absolute_command_scale, (int, float)) and hasattr(motor, "absolute_command_scale"):
+                        setattr(motor, "absolute_command_scale", float(absolute_command_scale))
+                    if isinstance(incremental_command_scale, (int, float)) and hasattr(motor, "incremental_command_scale"):
+                        setattr(motor, "incremental_command_scale", float(incremental_command_scale))
                     group_channels[group_id]["positional_servo"].append(actuator_name)
                     group_channel_metadata[group_id]["positional_servo"].append(
                         {
@@ -1360,6 +1491,11 @@ def register_mujoco_motors(
                             "joint_name": joint_name,
                             "link_name": link_name,
                             "actuator_name": actuator_name,
+                            "incremental_step_ratio": incremental_step_ratio,
+                            "control_semantics": control_semantics,
+                            "contract_version": contract_version,
+                            "absolute_command_scale": absolute_command_scale,
+                            "incremental_command_scale": incremental_command_scale,
                         }
                     )
                     device_type = "ServoMotor"
@@ -1371,6 +1507,12 @@ def register_mujoco_motors(
                         unit_id=group_id,
                         channel_index=channel_index,
                     )
+                    if isinstance(control_semantics, str) and control_semantics and hasattr(motor, "control_semantics"):
+                        setattr(motor, "control_semantics", control_semantics)
+                    if isinstance(absolute_command_scale, (int, float)) and hasattr(motor, "absolute_command_scale"):
+                        setattr(motor, "absolute_command_scale", float(absolute_command_scale))
+                    if isinstance(incremental_command_scale, (int, float)) and hasattr(motor, "incremental_command_scale"):
+                        setattr(motor, "incremental_command_scale", float(incremental_command_scale))
                     group_channels[group_id]["rotary_motor"].append(actuator_name)
                     group_channel_metadata[group_id]["rotary_motor"].append(
                         {
@@ -1381,6 +1523,11 @@ def register_mujoco_motors(
                             "joint_name": joint_name,
                             "link_name": link_name,
                             "actuator_name": actuator_name,
+                            "incremental_step_ratio": incremental_step_ratio,
+                            "control_semantics": control_semantics,
+                            "contract_version": contract_version,
+                            "absolute_command_scale": absolute_command_scale,
+                            "incremental_command_scale": incremental_command_scale,
                         }
                     )
                     device_type = "RotaryMotor"
@@ -2126,17 +2273,48 @@ def main():
                             if args.motor_gain != 1.0:
                                 angle = center + ((angle - center) * args.motor_gain)
                                 angle = max(min_val, min(max_val, angle))
-                            
-                            data.ctrl[actuator_idx] = angle
-                            applied_ctrl = angle
+
+                            rx_mode = getattr(motor, "_last_rx_mode", None)
+                            rx_seq = getattr(motor, "_rx_command_seq", None)
+                            is_incremental = rx_mode == "incremental"
+                            has_new_incremental = False
+                            if is_incremental and isinstance(rx_seq, int):
+                                state_key = (group_id, channel_index)
+                                prev = motor_telemetry_state.get(state_key, {})
+                                prev_seq = int(prev.get("last_rx_seq", -1.0))
+                                has_new_incremental = rx_seq != prev_seq
+                            if is_incremental and not has_new_incremental:
+                                # Incremental updates are event-like: hold neutral when no new packet.
+                                neutral_ctrl = center
+                                data.ctrl[actuator_idx] = neutral_ctrl
+                                applied_ctrl = neutral_ctrl
+                                norm_cmd = 0.0
+                            else:
+                                data.ctrl[actuator_idx] = angle
+                                applied_ctrl = angle
                         elif isinstance(motor, RotaryMotor):
                             speed = motor.get_speed()
                             norm_cmd = _clamp(float(speed), -1.0, 1.0)
                             if args.motor_gain != 1.0:
                                 speed = max(-1.0, min(1.0, speed * args.motor_gain))
-                            
-                            data.ctrl[actuator_idx] = speed
-                            applied_ctrl = speed
+
+                            rx_mode = getattr(motor, "_last_rx_mode", None)
+                            rx_seq = getattr(motor, "_rx_command_seq", None)
+                            is_incremental = rx_mode == "incremental"
+                            has_new_incremental = False
+                            if is_incremental and isinstance(rx_seq, int):
+                                state_key = (group_id, channel_index)
+                                prev = motor_telemetry_state.get(state_key, {})
+                                prev_seq = int(prev.get("last_rx_seq", -1.0))
+                                has_new_incremental = rx_seq != prev_seq
+                            if is_incremental and not has_new_incremental:
+                                # Incremental updates are event-like: hold neutral when no new packet.
+                                data.ctrl[actuator_idx] = 0.0
+                                applied_ctrl = 0.0
+                                norm_cmd = 0.0
+                            else:
+                                data.ctrl[actuator_idx] = speed
+                                applied_ctrl = speed
                         else:
                             continue
 
@@ -2148,8 +2326,12 @@ def main():
                                 "last_applied_ctrl": applied_ctrl,
                                 "last_change_frame": 0.0,
                                 "seen_change": False,
+                                "last_rx_seq": -1.0,
                             },
                         )
+                        rx_seq_for_state = getattr(motor, "_rx_command_seq", None)
+                        if isinstance(rx_seq_for_state, int):
+                            state["last_rx_seq"] = float(rx_seq_for_state)
                         was_changed = (
                             abs(norm_cmd - state["last_norm_cmd"]) > 1e-6
                             or abs(applied_ctrl - state["last_applied_ctrl"]) > 1e-6
