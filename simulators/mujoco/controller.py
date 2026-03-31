@@ -540,6 +540,128 @@ def _prepare_model_load_path(entry_xml_path: str) -> tuple[str, Optional[str]]:
         return (entry_path, None)
 
 
+def _cleanup_mujoco_temp_dirs(
+    temp_model_dir: Optional[str],
+    keyframe_recovery_dir: Optional[str],
+) -> None:
+    """Remove temp directories used for ctrlrange patching and/or keyframe stripping."""
+    for path in (temp_model_dir, keyframe_recovery_dir):
+        if path and os.path.exists(path):
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+            except OSError as exc:
+                logger.info("[WARN] Failed to remove temp model dir %s: %s", path, exc)
+
+
+def _write_mjcf_without_keyframes(src_path: str, dst_path: str) -> int:
+    """
+    Remove top-level <keyframe> elements from an MJCF file and write to dst_path.
+
+    Returns how many <keyframe> elements were removed. If zero, dst_path is not written.
+    """
+    tree = ET.parse(src_path)
+    root = tree.getroot()
+    removed = 0
+    for keyframe in list(root.findall("keyframe")):
+        root.remove(keyframe)
+        removed += 1
+    if removed == 0:
+        return 0
+    abs_dst = os.path.abspath(dst_path)
+    parent = os.path.dirname(abs_dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tree.write(
+        abs_dst,
+        default_namespace="",
+        xml_declaration=True,
+        method="xml",
+        encoding="utf-8",
+    )
+    return removed
+
+
+def _load_mujoco_model_resilient(
+    model_load_path: str,
+    temp_model_dir: Optional[str],
+) -> tuple[Any, Any, Optional[str]]:
+    """
+    Load MuJoCo model from XML. On compile failure, retry once after stripping
+    invalid <keyframe> sections from the entry MJCF (common when qpos length
+    does not match nq). Keyframes in `<include>` files are not modified.
+
+    Returns (MjModel, MjData, keyframe_recovery_temp_dir_or_none).
+    """
+    abs_load = os.path.abspath(model_load_path)
+    logger.info("[LOAD] Loading model from: %s", abs_load)
+    first_err: Optional[Exception] = None
+    try:
+        model = mujoco.MjModel.from_xml_path(abs_load)
+        data = mujoco.MjData(model)
+        logger.info("[OK] Model loaded: %d DOF, %d actuators", model.nq, model.nu)
+        return model, data, None
+    except Exception as exc:
+        first_err = exc
+        logger.warning(
+            "[LOAD][WARN] MuJoCo could not compile the model (common causes: keyframe "
+            "qpos length vs nq mismatch, bad includes, or schema errors). Error: %s",
+            exc,
+        )
+
+    keyframe_recovery_dir: Optional[str] = None
+    stripped_path: Optional[str] = None
+    removed = 0
+
+    if temp_model_dir:
+        stripped_path = os.path.join(
+            temp_model_dir,
+            os.path.splitext(os.path.basename(abs_load))[0] + "__no_keyframes.xml",
+        )
+        removed = _write_mjcf_without_keyframes(abs_load, stripped_path)
+    else:
+        model_dir = os.path.dirname(abs_load)
+        keyframe_recovery_dir = tempfile.mkdtemp(prefix="feagi_mujoco_kfstrip_")
+        shutil.copytree(model_dir, keyframe_recovery_dir, dirs_exist_ok=True)
+        stripped_path = os.path.join(keyframe_recovery_dir, os.path.basename(abs_load))
+        removed = _write_mjcf_without_keyframes(stripped_path, stripped_path)
+
+    if removed <= 0:
+        if keyframe_recovery_dir and os.path.exists(keyframe_recovery_dir):
+            shutil.rmtree(keyframe_recovery_dir, ignore_errors=True)
+        logger.warning(
+            "[LOAD][RECOVER] No <keyframe> in entry XML to remove. If keyframes live only "
+            "in included MJCF files, edit those files or fix qpos lengths manually.",
+        )
+        assert first_err is not None
+        raise first_err
+
+    try:
+        logger.warning(
+            "[LOAD][RECOVER] Removed %d <keyframe> section(s). Named keyframe poses are "
+            "unavailable; simulation will use default reset. Retrying load from: %s",
+            removed,
+            stripped_path,
+        )
+        assert stripped_path is not None
+        model = mujoco.MjModel.from_xml_path(stripped_path)
+        data = mujoco.MjData(model)
+        logger.info(
+            "[OK] Model loaded after keyframe recovery: %d DOF, %d actuators",
+            model.nq,
+            model.nu,
+        )
+        return model, data, keyframe_recovery_dir
+    except Exception as second_err:
+        if keyframe_recovery_dir and os.path.exists(keyframe_recovery_dir):
+            shutil.rmtree(keyframe_recovery_dir, ignore_errors=True)
+        logger.error(
+            "[FAIL] Model load failed even after removing keyframes from entry XML: %s",
+            second_err,
+        )
+        assert first_err is not None
+        raise first_err from second_err
+
+
 def _sanitize_name(name: str) -> str:
     """Normalize MuJoCo names for cross-platform stability."""
     return name.replace("/", "_").replace("\\", "_")
@@ -2229,17 +2351,16 @@ def main():
 
     # Prepare model path: patch missing/zero ctrlrange in temp copy if needed
     model_load_path, temp_model_dir = _prepare_model_load_path(args.model_xml)
+    keyframe_recovery_dir: Optional[str] = None
 
-    # Load MuJoCo model from provided path (or patched temp copy)
+    # Load MuJoCo model; on keyframe/qpos mismatch, strip <keyframe> from entry MJCF and retry
     try:
-        logger.info(f"[LOAD] Loading model from: {model_load_path}")
-        model = mujoco.MjModel.from_xml_path(model_load_path)
-        data = mujoco.MjData(model)
-        logger.info(f"[OK] Model loaded: {model.nq} DOF, {model.nu} actuators")
-    except Exception as e:
-        logger.info(f"[FAIL] Failed to load model '{model_load_path}': {e}")
-        if temp_model_dir and os.path.exists(temp_model_dir):
-            shutil.rmtree(temp_model_dir, ignore_errors=True)
+        model, data, keyframe_recovery_dir = _load_mujoco_model_resilient(
+            model_load_path,
+            temp_model_dir,
+        )
+    except Exception:
+        _cleanup_mujoco_temp_dirs(temp_model_dir, None)
         return 1
 
     # Determine number of actuated joints (skip free joints)
@@ -2428,8 +2549,7 @@ def main():
             "[FAIL] No motors and no FEAGI sensory outputs (vision/scalar cache); "
             "nothing to stream. Add cameras/sensors to the model or use a robot with actuators."
         )
-        if temp_model_dir and os.path.exists(temp_model_dir):
-            shutil.rmtree(temp_model_dir, ignore_errors=True)
+        _cleanup_mujoco_temp_dirs(temp_model_dir, keyframe_recovery_dir)
         return 1
     if sensors_only_feagi:
         logger.info(
@@ -2500,8 +2620,7 @@ def main():
             )
         except Exception as rate_error:
             logger.info("[FAIL] FEAGI simulation rate negotiation failed: %s", rate_error)
-            if temp_model_dir and os.path.exists(temp_model_dir):
-                shutil.rmtree(temp_model_dir, ignore_errors=True)
+            _cleanup_mujoco_temp_dirs(temp_model_dir, keyframe_recovery_dir)
             return 1
 
     except Exception as e:
@@ -3088,12 +3207,7 @@ def main():
         except Exception as e:
             logger.info(f"[WARN] Error disconnecting: {e}")
 
-    # Cleanup temp model dir if we patched ctrlrange
-    if temp_model_dir and os.path.exists(temp_model_dir):
-        try:
-            shutil.rmtree(temp_model_dir, ignore_errors=True)
-        except Exception as e:
-            logger.info("[WARN] Failed to remove temp model dir: %s", e)
+    _cleanup_mujoco_temp_dirs(temp_model_dir, keyframe_recovery_dir)
 
     logger.info("[DONE] MuJoCo controller shutdown complete")
     return 0

@@ -319,3 +319,23 @@ def test_name_mapping_translator_uses_per_model_tables():
         leap_translator.translate_joint("rf_mcp")
         == "ring_finger_metacarpophalangeal"
     )
+
+
+def test_write_mjcf_without_keyframes_removes_section(tmp_path):
+    """Entry MJCF keyframe strip used when MuJoCo rejects invalid keyframe qpos."""
+    controller = _load_controller_module()
+    src = tmp_path / "minimal.xml"
+    src.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<mujoco>
+  <worldbody><body name="b"><geom type="sphere" size="0.1"/></body></worldbody>
+  <keyframe><key name="squat" qpos="0 0 0"/></keyframe>
+</mujoco>
+""",
+        encoding="utf-8",
+    )
+    dst = tmp_path / "stripped.xml"
+    removed = controller._write_mjcf_without_keyframes(str(src), str(dst))
+    assert removed == 1
+    text = dst.read_text(encoding="utf-8")
+    assert "keyframe" not in text.lower()
