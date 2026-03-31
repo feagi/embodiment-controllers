@@ -2421,83 +2421,95 @@ def main():
             max_val,
         )
 
-    if len(motors) == 0:
-        logger.info("[FAIL] No motors registered - cannot connect to FEAGI")
-        logger.info("   Aborting startup: FEAGI motor IO is required.")
+    sensors_only_feagi = len(motors) == 0
+    has_feagi_sensory = bool(vision_units) or bool(sensor_registration_map)
+    if sensors_only_feagi and not has_feagi_sensory:
+        logger.info(
+            "[FAIL] No motors and no FEAGI sensory outputs (vision/scalar cache); "
+            "nothing to stream. Add cameras/sensors to the model or use a robot with actuators."
+        )
         if temp_model_dir and os.path.exists(temp_model_dir):
             shutil.rmtree(temp_model_dir, ignore_errors=True)
         return 1
-    else:
-        feagi_enabled = True
+    if sensors_only_feagi:
+        logger.info(
+            "[CFG] Sensors-only FEAGI mode: 0 actuators; motor ZMQ receive disabled, "
+            "vision/scalar sensory streaming enabled."
+        )
 
-        # brain_output already configured before register_mujoco_motors()
+    feagi_enabled = True
+
+    # brain_output already configured before register_mujoco_motors()
+    try:
+        # Ensure the motor unit is registered in the Rust ConnectorAgent with the
+        # correct channel count BEFORE FEAGI registration.
+        #
+        # Otherwise FEAGI will create a default 1-channel motor OPU and
+        # never reflect the true number of joints.
         try:
-            # Ensure the motor unit is registered in the Rust ConnectorAgent with the
-            # correct channel count BEFORE FEAGI registration.
-            #
-            # Otherwise FEAGI will create a default 1-channel motor OPU and
-            # never reflect the true number of joints.
-            try:
-                # Register sensory and motor layouts via SDK wrappers.
-                if vision_units:
-                    peripheral_resolution = None
-                    if name_translator is not None:
-                        peripheral_resolution = (
-                            name_translator.get_vision_peripheral_resolution()
-                        )
-                    vision_groups = brain_output.register_vision_groups(
-                        vision_units,
-                        peripheral_resolution=peripheral_resolution,
+            # Register sensory and motor layouts via SDK wrappers.
+            if vision_units:
+                peripheral_resolution = None
+                if name_translator is not None:
+                    peripheral_resolution = (
+                        name_translator.get_vision_peripheral_resolution()
                     )
-                    logger.info(
-                        "[VISION] Registered %d vision cache group(s): %s",
-                        len(vision_groups),
-                        vision_groups,
-                    )
-                scalar_sensor_groups = register_mujoco_sensors_in_cache(
-                    sensor_registration_map,
-                    group_index_start=sensor_group_index_start,
+                vision_groups = brain_output.register_vision_groups(
+                    vision_units,
+                    peripheral_resolution=peripheral_resolution,
                 )
                 logger.info(
-                    "[SENSORY] Registered scalar sensory cache groups with offset=%d: %s",
-                    sensor_group_index_start,
-                    scalar_sensor_groups,
+                    "[VISION] Registered %d vision cache group(s): %s",
+                    len(vision_groups),
+                    vision_groups,
                 )
-                brain_output.register_motor_groups(
-                    group_channels,
-                    z_neuron_resolution=10,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to register motor devices in ConnectorAgent: {e}"
-                ) from e
+            scalar_sensor_groups = register_mujoco_sensors_in_cache(
+                sensor_registration_map,
+                group_index_start=sensor_group_index_start,
+            )
+            logger.info(
+                "[SENSORY] Registered scalar sensory cache groups with offset=%d: %s",
+                sensor_group_index_start,
+                scalar_sensor_groups,
+            )
+            brain_output.register_motor_groups(
+                group_channels,
+                z_neuron_resolution=10,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to register motor devices in ConnectorAgent: {e}"
+            ) from e
 
-            # Connect motor stream and decode via SDK abstractions.
+        if not sensors_only_feagi:
             logger.info("[CONN] Connecting motor stream (Python SDK)...")
             expected_motor_ids = _build_expected_motor_cortical_ids(motors)
             if hasattr(brain_output, "_collect_motor_cortical_ids"):
                 brain_output._collect_motor_cortical_ids = lambda: list(expected_motor_ids)
-            brain_output.connect()
-            logger.info("   [OK] Motor stream connected!")
-            try:
-                _enforce_feagi_model_rate_strict(
-                    model,
-                    args.ip,
-                    args.port,
-                    args.feagi_http_timeout_s,
-                )
-            except Exception as rate_error:
-                logger.info("[FAIL] FEAGI simulation rate negotiation failed: %s", rate_error)
-                if temp_model_dir and os.path.exists(temp_model_dir):
-                    shutil.rmtree(temp_model_dir, ignore_errors=True)
-                return 1
-            
-        except Exception as e:
-            logger.info(f"   [FAIL] FEAGI connection failed: {e}")
-            logger.info(
-                "   Continuing in standalone mode (viewer only, no FEAGI motor control)"
+        else:
+            logger.info("[CONN] Connecting FEAGI (sensory-only agent; no motor commands)...")
+
+        brain_output.connect()
+        logger.info("   [OK] FEAGI connection established!")
+        try:
+            _enforce_feagi_model_rate_strict(
+                model,
+                args.ip,
+                args.port,
+                args.feagi_http_timeout_s,
             )
-            feagi_enabled = False
+        except Exception as rate_error:
+            logger.info("[FAIL] FEAGI simulation rate negotiation failed: %s", rate_error)
+            if temp_model_dir and os.path.exists(temp_model_dir):
+                shutil.rmtree(temp_model_dir, ignore_errors=True)
+            return 1
+
+    except Exception as e:
+        logger.info(f"   [FAIL] FEAGI connection failed: {e}")
+        logger.info(
+            "   Continuing in standalone mode (viewer only, no FEAGI motor control)"
+        )
+        feagi_enabled = False
 
     # Launch MuJoCo viewer
     logger.info("\n[VIEW] Launching MuJoCo viewer...")
@@ -2516,7 +2528,10 @@ def main():
         logger.info("   You can manually move joints with the mouse")
         logger.info("   Physics simulation runs at 120 FPS")
         if feagi_enabled:
-            logger.info("   FEAGI motor control: ACTIVE")
+            if sensors_only_feagi:
+                logger.info("   FEAGI sensory streaming: ACTIVE (no motors)")
+            else:
+                logger.info("   FEAGI motor control: ACTIVE")
         else:
             logger.info("   FEAGI motor control: DISABLED (standalone mode)")
 
