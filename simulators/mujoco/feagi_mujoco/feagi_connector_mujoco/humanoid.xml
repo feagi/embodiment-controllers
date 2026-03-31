@@ -104,6 +104,8 @@
   <worldbody>
     <geom name="floor" size="0 0 .05" type="plane" material="grid" condim="3"/>
     <light name="spotlight" mode="targetbodycom" target="torso" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -6 4" cutoff="30"/>
+    <geom name="scene_cube_a" type="box" size="0.15 0.15 0.15" pos="1.1 0.65 0.15" rgba="0.82 0.42 0.28 1" condim="3"/>
+    <geom name="scene_cube_b" type="box" size="0.12 0.12 0.22" pos="-0.95 -0.75 0.22" rgba="0.32 0.58 0.82 1" condim="3"/>
     <body name="torso" pos="0 0 1.282" childclass="body">
       <light name="top" pos="0 0 2" mode="trackcom"/>
       <camera name="back" pos="-3 0 1" xyaxes="0 -1 0 1 0 2" mode="trackcom"/>
@@ -115,18 +117,6 @@
         <geom name="head" type="sphere" size=".09"/>
         <site name="head_gyro_mount" pos="0 0 0" size="0.01"/>
         <camera name="egocentric" pos=".09 0 0" xyaxes="0 -1 0 .1 0 1" fovy="80"/>
-
-
-      <replicate count="16" euler="0 4 0">
-        <replicate count="16" euler="0 0 4">
-          <site name="rf" pos=".16 0 0" zaxis="1 0 0"/>
-        </replicate>
-      </replicate>
-<!--        <replicate count="16" euler="0 4 0">-->
-<!--          <replicate count="16" euler="0 0 -4">-->
-<!--            <site name="rf" pos=".16 0 0" zaxis="1 0 0"/>-->
-<!--          </replicate>-->
-<!--        </replicate>-->
 
       </body>
       <body name="waist_lower" pos="-.01 0 -.26">
@@ -248,8 +238,7 @@
     <distance cutoff="10" name="upper_arm_left_elevation" geom1="upper_arm_left" geom2="floor"/>
     <distance cutoff="10" name="upper_arm_right_elevation" geom1="upper_arm_right" geom2="floor"/>
 
-    <!-- Final 16 values in data.sensor (4x4 loop with replicate for 16 lasers) -->
-    <rangefinder name="head_camera" site="rf"/>
+    <rangefinder name="head_camera" site="head_gyro_mount"/>
   </sensor>
 
 

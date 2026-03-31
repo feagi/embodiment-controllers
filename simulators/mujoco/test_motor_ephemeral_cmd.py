@@ -1,4 +1,4 @@
-"""Unit tests for ephemeral motor command gating (MuJoCo controller)."""
+"""Unit tests for FEAGI motor rx sequence detection (MuJoCo controller)."""
 
 import unittest
 
@@ -6,7 +6,7 @@ from motor_ephemeral_utils import motor_rx_is_new_packet as _motor_rx_is_new_pac
 
 
 class TestMotorRxIsNewPacket(unittest.TestCase):
-    """Guards FEAGI motor ephemeral policy: new packet iff rx sequence advances."""
+    """New motor packet iff rx sequence advances (used for sparse-command hold logic)."""
 
     def test_advances_from_initial(self):
         self.assertTrue(_motor_rx_is_new_packet(0, -1))
