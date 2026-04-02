@@ -2092,6 +2092,11 @@ def _build_vision_units_from_model(
 
     Register every camera mounted on the robot body subtree (not scene/world cameras)
     as a separate FEAGI vision group.
+
+    Robot scope is normally the common ancestor of all non-free joint attachment
+    bodies. For jointless rigs (static meshes, camera-only assets with no explicit
+    ``<joint>``), the same ancestor is inferred from bodies that mount fixed cameras
+    so vision still registers.
     """
     if not (hasattr(model, "vis") and hasattr(model.vis, "global_")):
         return [], []
@@ -2105,6 +2110,8 @@ def _build_vision_units_from_model(
         return [], []
 
     body_parent = [int(model.body_parentid[i]) for i in range(nbody)]
+    ncam = int(getattr(model, "ncam", 0) or 0)
+    fixed_camera_mode = int(getattr(mujoco.mjtCamLight, "mjCAMLIGHT_FIXED", 0))
 
     def _ancestors(body_id: int) -> list[int]:
         lineage: list[int] = []
@@ -2126,6 +2133,23 @@ def _build_vision_units_from_model(
             int(model.jnt_bodyid[joint_index])
             for joint_index in range(int(getattr(model, "njnt", 0) or 0))
         ]
+    if not candidate_body_ids:
+        # Jointless MJCF (e.g. static camera housing): infer robot subtree from fixed
+        # camera mount bodies so LCA and camera filtering still apply.
+        mount_body_ids: list[int] = []
+        for camera_index in range(ncam):
+            if int(model.cam_mode[camera_index]) != fixed_camera_mode:
+                continue
+            cam_body_id = int(model.cam_bodyid[camera_index])
+            if cam_body_id > 0:
+                mount_body_ids.append(cam_body_id)
+        candidate_body_ids = sorted(set(mount_body_ids))
+        if candidate_body_ids:
+            logger.info(
+                "[VISION] Robot root inferred from fixed camera mounts "
+                "(no joint bodies): mount_body_ids=%s",
+                candidate_body_ids,
+            )
     if not candidate_body_ids:
         return [], []
 
@@ -2151,8 +2175,6 @@ def _build_vision_units_from_model(
         return False
 
     selected_cameras: list[tuple[str, int]] = []
-    ncam = int(getattr(model, "ncam", 0) or 0)
-    fixed_camera_mode = int(getattr(mujoco.mjtCamLight, "mjCAMLIGHT_FIXED", 0))
     for camera_index in range(ncam):
         camera_mode = int(model.cam_mode[camera_index])
         # Mounted robot sensors should be fixed to their mount body; tracking
