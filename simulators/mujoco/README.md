@@ -28,7 +28,7 @@ For full installation and configuration details, see the [FEAGI Installation Gui
 ## Requirements
 
 - Python 3.10, 3.11, or 3.12 (not 3.13+; mujoco 3.2.3 has no wheels for newer Python)
-- feagi-core>=2.1.35
+- feagi-core>=2.1.36
 - mujoco==3.6.0
 - numpy==1.26.4
 - **macOS**: Use `mjpython` (installed with mujoco) instead of `python` for the viewer to open. Linux and Windows use standard `python`.

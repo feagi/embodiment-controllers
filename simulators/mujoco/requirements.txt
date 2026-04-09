@@ -1,5 +1,5 @@
 # FEAGI Python SDK (aligned with feagi-python-sdk)
-feagi-core>=2.1.35
+feagi-core>=2.1.36
 
 # MuJoCo physics simulator
 mujoco==3.6.0
