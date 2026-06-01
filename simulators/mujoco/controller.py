@@ -936,17 +936,16 @@ def _sensor_tag_to_feagi_unit(sensor_tag: str) -> Optional[str]:
         return "Vision"
     if normalized in ("framequat", "gyro", "ballquat", "magnetometer"):
         return "Gyroscope"
+    if normalized in ("jointpos", "tendonpos", "actuatorpos"):
+        return "Servo"
     if normalized in (
         "distance",
         "geomdist",
         "proximity",
         "touch",
         "velocimeter",
-        "jointpos",
         "jointvel",
-        "tendonpos",
         "tendonvel",
-        "actuatorpos",
         "actuatorvel",
         "framepos",
         "framelinvel",
@@ -971,17 +970,16 @@ def _sensor_tag_to_signal_type(sensor_tag: str) -> str:
         return "vision"
     if normalized in ("framequat", "gyro", "magnetometer"):
         return "gyroscope"
+    if normalized in ("jointpos", "tendonpos", "actuatorpos"):
+        return "servo_encoder"
     if normalized in (
         "distance",
         "geomdist",
         "proximity",
         "touch",
         "velocimeter",
-        "jointpos",
         "jointvel",
-        "tendonpos",
         "tendonvel",
-        "actuatorpos",
         "actuatorvel",
         "framepos",
         "framelinvel",
@@ -1115,12 +1113,12 @@ def _build_sensor_registration_map(
 
         qpos_addr = int(model.jnt_qposadr[joint_id])
         joint_pos_name = f"jointpos_{joint_name}"
-        joint_pos_display_name = f"joint_position_{display_joint_name}"
+        joint_pos_display_name = f"servo_encoder_position_{display_joint_name}"
         if name_translator is not None:
             joint_pos_display_name = name_translator.translate_sensor(
                 joint_pos_name
             ) if joint_pos_name in name_translator.model_sensors else joint_pos_display_name
-        by_unit.setdefault("Proximity", []).append(
+        by_unit.setdefault("Servo", []).append(
             SensorRegistration(
                 sensor_name=joint_pos_name,
                 display_name=joint_pos_display_name,
@@ -2435,7 +2433,7 @@ def main():
         model_load_path,
         name_translator=name_translator,
     )
-    supported_scalar_sensor_units = {"Proximity", "Shock", "MiscData"}
+    supported_scalar_sensor_units = {"Proximity", "Servo", "Shock", "MiscData"}
     unsupported_registration_details: dict[str, list[str]] = {}
     for unit_key, registrations in sensor_registration_map.items():
         if unit_key in supported_scalar_sensor_units:

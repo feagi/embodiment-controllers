@@ -1,0 +1,152 @@
+{
+  "schema_version": "1.0.0",
+  "bundle": {
+    "id": "ros2",
+    "version": "1.1.1",
+    "created_at": "2026-05-01T00:00:00Z",
+    "updated_at": "2026-05-13T00:00:00Z",
+    "build_number": 2,
+    "checksum": ""
+  },
+  "controller": {
+    "name": "ROS 2 Middleware",
+    "description": "FEAGI ROS 2 middleware bundle for versioning, deploy, and discovery. Bridges DDS topic graphs to the FEAGI engine for robot stacks that depend on ROS 2.",
+    "long_description_file": "README.md",
+    "author": {
+      "name": "Neuraville Inc.",
+      "email": "support@neuraville.com",
+      "url": "https://neuraville.com"
+    },
+    "category": "middleware",
+    "subcategory": "ros2",
+    "tags": ["ros2", "robotics", "dds", "middleware", "topics"],
+    "license": "Apache-2.0"
+  },
+  "source": {
+    "repository": "https://github.com/feagi/embodiment-controllers",
+    "path": "controllers/middleware/ros2",
+    "commit": "",
+    "branch": "main",
+    "last_synced": "2026-05-01T00:00:00Z"
+  },
+  "requirements": {
+    "feagi_core": {
+      "min_version": "2.1.40",
+      "max_version": null,
+      "tested_with": "2.1.40"
+    },
+    "python": {
+      "min_version": "3.10.0",
+      "max_version": "3.13.0",
+      "tested_with": "3.10.15"
+    },
+    "platform": {
+      "supported": ["windows", "macos", "linux"],
+      "tested": ["macos", "linux"]
+    },
+    "external": null,
+    "hardware": {
+      "cpu_cores": 2,
+      "ram_mb": 4096,
+      "disk_mb": 200,
+      "gpu": false
+    }
+  },
+  "capabilities": {
+    "sensors": {},
+    "actuators": {}
+  },
+  "media": {
+    "thumbnail": {
+      "url": "",
+      "checksum": ""
+    },
+    "hero": {
+      "url": "",
+      "checksum": ""
+    },
+    "demo_video": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "demo_gif": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "screenshots": []
+  },
+  "examples": [
+    {
+      "id": "generic_stack",
+      "name": "Generic ROS 2 Stack",
+      "description": "Embodiments reference controller_metadata.controller_type = ros2 for deploy and versioning",
+      "path": "",
+      "genome": "",
+      "connectome": "",
+      "readme": "",
+      "available": true,
+      "status": "planned"
+    }
+  ],
+  "installation": {
+    "type": "python_venv",
+    "entry_point": "ros_connector_bridge.py",
+    "install_script": null,
+    "post_install_checks": []
+  },
+  "marketplace": {
+    "status": "active",
+    "featured": false,
+    "price": {
+      "amount": 0,
+      "currency": "USD",
+      "model": "free"
+    },
+    "stats": {
+      "downloads": 0,
+      "rating": 0.0,
+      "rating_count": 0,
+      "views": 0
+    },
+    "visibility": "public",
+    "review": {
+      "status": "approved",
+      "reviewed_by": "system",
+      "reviewed_at": "2026-05-01T00:00:00Z",
+      "notes": "ROS Connector bridge shipped in bundle for desktop install from Composer"
+    }
+  },
+  "support": {
+    "documentation": "https://docs.feagi.org",
+    "issues": "https://github.com/feagi/embodiment-controllers/issues",
+    "discord": "https://discord.gg/feagi",
+    "email": "support@neuraville.com"
+  },
+  "changelog": [
+    {
+      "version": "1.1.1",
+      "date": "2026-05-13",
+      "changes": [
+        "Require feagi-core>=2.1.40 and feagi-rust-py-libs>=0.0.102 (ConnectorAgent.register_callback motor wiring)"
+      ]
+    },
+    {
+      "version": "1.1.0",
+      "date": "2026-05-11",
+      "changes": [
+        "Ship ros_connector_bridge.py as manifest entry_point (removed from desktop bundle)",
+        "Manifest shape aligned with desktop controller installer (capabilities sensors/actuators)"
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "date": "2026-05-01",
+      "changes": [
+        "Initial ros2 middleware controller bundle for versioning and Composer deploy",
+        "Canonical controller_id ros2 aligned with middleware category"
+      ]
+    }
+  ]
+}

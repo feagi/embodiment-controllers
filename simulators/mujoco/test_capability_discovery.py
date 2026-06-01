@@ -60,6 +60,7 @@ def test_spot_discovers_derived_channels_strict_mode():
     )
 
     assert "Proximity" in sensor_map
+    assert "Servo" in sensor_map
     assert "MiscData" in sensor_map
     assert any(ch.source_kind == "qpos" for ch in runtime_channels)
     assert any(ch.source_kind == "qvel" for ch in runtime_channels)
@@ -283,10 +284,10 @@ def test_spot_name_mapping_translates_motor_and_sensor_labels():
         strict_mode=True,
         name_translator=translator,
     )
-    proximity_labels = [entry.display_name for entry in sensor_map["Proximity"]]
+    servo_labels = [entry.display_name for entry in sensor_map["Servo"]]
     assert any(
-        label == "joint_position_front_right_hip_roll"
-        for label in proximity_labels
+        label == "servo_encoder_position_front_right_hip_roll"
+        for label in servo_labels
     )
 
 

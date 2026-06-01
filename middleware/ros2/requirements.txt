@@ -1,0 +1,14 @@
+# FEAGI client (aligned with feagi-python-sdk)
+feagi-core>=2.1.40
+
+# Vision preprocessing (ros_connector_bridge.py)
+numpy>=1.26.4,<3
+
+# ROS 2 Python (rclpy, message packages) is not pip-pinned here: Neurorobotics Studio locates your
+# `ros2` CLI (same discovery as Topic scan / settings / FEAGI_ROS2) and configures PYTHONPATH and
+# the interpreter beside that `ros2`. Optional overrides: FEAGI_ROS_PYTHON, sourced shell env.
+
+# FEAGI PyO3 bindings (health monitor / PNS). Composer venv installs this for the bundled-Python layout.
+# When the connector runs your ROS interpreter, Studio pip-installs into that env on first Start
+# unless FEAGI_ROS_CONNECTOR_SKIP_AUTOPPIP=1.
+feagi-rust-py-libs>=0.0.102

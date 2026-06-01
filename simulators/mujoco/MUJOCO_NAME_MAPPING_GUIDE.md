@@ -72,7 +72,7 @@ The controller reads model-local mapping files and applies those labels during r
     "LF_HAA": "left_front_hip_abduction_adduction"
   },
   "sensors": {
-    "jointpos_LF_HAA": "joint_position_left_front_hip_abduction_adduction",
+    "jointpos_LF_HAA": "servo_encoder_position_left_front_hip_abduction_adduction",
     "jointvel_LF_HAA": "joint_velocity_left_front_hip_abduction_adduction"
   },
   "source_entities": {}

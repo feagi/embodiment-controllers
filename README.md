@@ -20,7 +20,7 @@ The controller is the bridge. The agent is the result when everything works toge
 
 ## What's Inside
 
-This repository is organized into two main categories:
+This repository is organized into the following areas:
 
 ### Physical Embodiments (`/embodiments`)
 
@@ -32,6 +32,12 @@ Real-world hardware platforms organized by manufacturer:
 - **Sensors**: Hokuyo LiDAR
 - **Drones**: Ryze (Tello)
 - **Other**: Elecfreaks (Cutebot), Neuraville (audio, video, webcam), Keystudio
+
+### Middleware (`/middleware`)
+
+Generic bridges for DDS / robotics stacks shared by many embodiments:
+
+- **ROS 2**: Middleware bundle at `middleware/ros2/` (`controller_metadata.controller_type` = `ros2`).
 
 ### Simulators (`/simulators`)
 
