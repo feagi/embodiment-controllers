@@ -2354,9 +2354,7 @@ def main():
     )
     try:
         import feagi.pns.client as feagi_client_module
-        import feagi.pns.xyzp_decoders as feagi_xyzp_module
         logger.info("[SDK] feagi.pns.client=%s", inspect.getsourcefile(feagi_client_module))
-        logger.info("[SDK] feagi.pns.xyzp_decoders=%s", inspect.getsourcefile(feagi_xyzp_module))
     except Exception as sdk_path_err:
         logger.info("[SDK] Failed to resolve SDK source paths: %s", sdk_path_err)
     logger.info(f"[FEAGI] {args.ip}:{args.port}")
