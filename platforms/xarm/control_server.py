@@ -34,8 +34,12 @@ logger = logging.getLogger("xarm_controller.control_server")
 
 #: Manual jog/move/gripper actions handled by the service.
 _MANUAL_MOTION_ACTIONS: Final[frozenset[str]] = frozenset(
-    {"jog", "move_cartesian", "gripper", "home"}
+    {"jog", "move_joints", "move_cartesian", "gripper", "home"}
 )
+
+#: Lite6 hardware limits (deg/s and mm/s). Source: UFACTORY technical specs.
+_MAX_JOINT_SPEED_DEG_S: Final[float] = 180.0
+_MAX_TCP_SPEED_MM_S: Final[float] = 500.0
 
 
 class ControlCommandError(ValueError):
@@ -85,6 +89,18 @@ class ControlService:
             with self._hw_lock:
                 self._device.recover_after_estop()
             return {"estopped": False}
+        if action == "clear_error":
+            with self._hw_lock:
+                self._device.enable()
+            return {"cleared": True}
+        if action == "set_manual_mode":
+            enabled = bool(body.get("enabled", False))
+            with self._hw_lock:
+                if enabled:
+                    self._device.set_manual_mode()
+                else:
+                    self._device.set_position_mode()
+            return {"manual_mode": enabled}
         if action == "set_owner":
             return self._handle_set_owner(body)
         if action == "status":
@@ -116,37 +132,67 @@ class ControlService:
         if not self._arbiter.begin_manual_command():
             raise ControlCommandError("Arm is emergency-stopped; clear e-stop first.")
         with self._hw_lock:
-            if action == "jog":
-                joint_index = self._require_int(body, "joint_index")
-                delta_deg = self._require_float(body, "delta_deg")
-                angles = self._device.jog_joint(
-                    joint_index, delta_deg, speed=self._manual_speed
-                )
-                return {"action": action, "angles": angles}
-            if action == "move_cartesian":
-                pose = body.get("pose")
-                if not isinstance(pose, (list, tuple)) or len(pose) != 6:
-                    raise ControlCommandError("pose must be a 6-element list.")
-                self._device.move_cartesian(pose, speed=self._cartesian_speed)
-                return {"action": action, "pose": list(pose)}
-            if action == "gripper":
+            try:
+                return self._dispatch_motion(action, body)
+            except XArmDeviceError:
                 try:
-                    gripper_action = GripperAction(str(body.get("gripper_action", "")))
-                except ValueError as exc:
-                    raise ControlCommandError(
-                        "gripper_action must be open/close/vacuum_on/vacuum_off."
-                    ) from exc
-                self._device.gripper(gripper_action)
-                return {"action": action, "gripper_action": gripper_action.value}
-            # action == "home"
-            self._device.home()
-            return {"action": action}
+                    self._device.enable()
+                    logger.info("[CONTROL] Auto-recovered arm after ControllerError.")
+                except Exception:  # noqa: BLE001
+                    logger.warning("[CONTROL] Auto-recovery failed.")
+                raise
+
+    def _dispatch_motion(self, action: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a single motion command (caller holds ``_hw_lock``)."""
+        if action == "jog":
+            joint_index = self._require_int(body, "joint_index")
+            delta_deg = self._require_float(body, "delta_deg")
+            angles = self._device.jog_joint(
+                joint_index, delta_deg, speed=min(self._manual_speed, _MAX_JOINT_SPEED_DEG_S)
+            )
+            return {"action": action, "angles": angles}
+        if action == "move_joints":
+            angles = body.get("angles")
+            if not isinstance(angles, (list, tuple)) or len(angles) == 0:
+                raise ControlCommandError("angles must be a non-empty list of joint angles.")
+            speed_override = body.get("speed_deg_s")
+            speed = (
+                float(speed_override)
+                if isinstance(speed_override, (int, float)) and not isinstance(speed_override, bool) and speed_override > 0
+                else self._manual_speed
+            )
+            speed = min(speed, _MAX_JOINT_SPEED_DEG_S)
+            self._device.set_joint_angles(
+                [float(a) for a in angles], speed=speed
+            )
+            return {"action": action, "angles": [float(a) for a in angles]}
+        if action == "move_cartesian":
+            pose = body.get("pose")
+            if not isinstance(pose, (list, tuple)) or len(pose) != 6:
+                raise ControlCommandError("pose must be a 6-element list.")
+            self._device.move_cartesian(pose, speed=min(self._cartesian_speed, _MAX_TCP_SPEED_MM_S))
+            return {"action": action, "pose": list(pose)}
+        if action == "gripper":
+            try:
+                gripper_action = GripperAction(str(body.get("gripper_action", "")))
+            except ValueError as exc:
+                raise ControlCommandError(
+                    "gripper_action must be open/close/stop/vacuum_on/vacuum_off."
+                ) from exc
+            self._device.gripper(gripper_action)
+            return {"action": action, "gripper_action": gripper_action.value}
+        # action == "home"
+        self._device.home()
+        return {"action": action}
 
     def _status_payload(self) -> Dict[str, Any]:
         status = self._arbiter.status()
         with self._hw_lock:
             angles = self._device.get_joint_angles()
+            cartesian = self._device.get_cartesian()
             dof = self._device.dof
+            error_code = self._device.error_code
+            arm_mode = self._device.mode
         return {
             "owner": status.owner.value,
             "estopped": status.estopped,
@@ -154,6 +200,9 @@ class ControlService:
             "manual_hold_remaining_s": round(status.manual_hold_remaining_s, 3),
             "dof": dof,
             "joint_angles_deg": angles,
+            "cartesian_pose": cartesian,
+            "error_code": error_code,
+            "arm_mode": arm_mode,
         }
 
     @staticmethod

@@ -6,19 +6,21 @@ Copyright 2016-2025 Neuraville Inc.
 """
 import hashlib
 import base64
+import binascii
 import json
 import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import argparse
 import logging
 import urllib.error
 import urllib.request
 import importlib.metadata
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Final, Literal, Optional, Tuple
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -27,7 +29,8 @@ from feagi.pns.outputs import ServoMotor, RotaryMotor
 from feagi.pns import brain_output
 import inspect
 
-from motor_ephemeral_utils import motor_rx_is_new_packet as _motor_rx_is_new_packet
+from mcp_introspection import MujocoIntrospectionServer
+from spatial_pointer_config import SpatialPointerConfig, parse_spatial_pointer_block
 
 
 # Standard logger (keeps controller compatible with released feagi SDK wheels)
@@ -39,8 +42,68 @@ logger = logging.getLogger("mujoco_controller")
 
 # Configuration
 RUNTIME = float('inf')
-SPEED = 120
 NAME_MAPPING_FILENAME = "mujoco_feagi_mappings.json"
+MISC_RESET_TRIGGER_THRESHOLD = 0.0
+MISC_RESET_BUNDLE_ID = "misc_reset"
+MISC_RESET_BUNDLE_TYPE = "reset_trigger"
+MISC_RESET_SIGNAL_TYPE = "misc_reset"
+MISC_RESET_SOURCE_ENTITY = "misc_reset"
+MISC_RESET_UNIT_FRIENDLY_NAME = "misc_reset"
+MISC_RESET_CHANNEL_FRIENDLY_NAME = "misc_reset_trigger"
+
+
+class MiscResetCommandTap:
+    """
+    Track miscellaneous reset command state for a single (group, channel).
+
+    The tap consumes FEAGI motor callbacks and exposes an edge-trigger helper
+    so simulation reset fires once per activation pulse.
+
+    Rising-edge detection is re-armed whenever a full burst cycle elapses with
+    no motor command for this channel. A quiet burst counts as an implicit
+    deactivation, so the next received activation fires a fresh edge even if
+    FEAGI re-broadcasts the same positive value without ever sending zero.
+    """
+
+    def __init__(self) -> None:
+        self._value: float = 0.0
+        self._command_seq: int = 0
+        self._last_consumed_seq: int = 0
+        self._last_active: bool = False
+        self._saw_command_this_burst: bool = False
+
+    def _on_motor_command(
+        self,
+        value: float,
+        command_mode: Optional[str] = None,
+    ) -> None:
+        _ = command_mode
+        self._value = float(value)
+        self._command_seq += 1
+        self._saw_command_this_burst = True
+
+    def consume_reset_pulse(self) -> bool:
+        """Return True exactly once when command transitions to active."""
+        if self._command_seq <= self._last_consumed_seq:
+            return False
+        self._last_consumed_seq = self._command_seq
+        is_active = self._value > MISC_RESET_TRIGGER_THRESHOLD
+        triggered = is_active and not self._last_active
+        self._last_active = is_active
+        return triggered
+
+    def notify_burst_complete(self) -> None:
+        """Mark end of a burst cycle; re-arm the edge detector on a quiet burst.
+
+        Call once per main-loop iteration after `brain_output.receive()` has
+        dispatched any pending motor callbacks. If no command was observed for
+        this channel during the burst, treat it as an implicit deactivation so
+        the next rising edge can fire again.
+        """
+        if not self._saw_command_this_burst:
+            self._last_active = False
+            self._value = 0.0
+        self._saw_command_this_burst = False
 
 
 def _resolve_controller_version_info() -> tuple[str, int | None]:
@@ -89,6 +152,17 @@ class MujocoNameTranslator:
     motor_control_contracts: dict[str, dict[str, Any]]
     vision_camera_overrides: list[str]
     vision_peripheral_resolution: Optional[tuple[int, int]]
+    sensor_cutoffs: dict[str, float]
+    # Optional per-joint maximum velocity magnitude (rad/s for hinge,
+    # m/s for slide). Provided via the model's overrides JSON when the
+    # joint range is not a meaningful proxy for expected qvel magnitudes
+    # (it usually isn't). When absent, the controller falls back to the
+    # joint's qpos range span as the normalization reference.
+    joint_velocity_max: dict[str, float]
+    # Optional FEAGI SpatialPointer -> Cartesian workspace (same schema as xARM).
+    spatial_pointer: Optional[SpatialPointerConfig] = None
+    spatial_pointer_ee_site: str = "link_tcp"
+    spatial_pointer_arm_dof_count: int = 6
 
     def translate_joint(self, joint_name: str) -> str:
         return self.model_joints.get(joint_name, joint_name)
@@ -144,6 +218,24 @@ class MujocoNameTranslator:
             return None
         return tuple(self.vision_peripheral_resolution)
 
+    def joint_velocity_max_for(self, joint_name: str) -> Optional[float]:
+        """Return optional per-joint qvel normalization magnitude.
+
+        Lookup is keyed by the sanitized MuJoCo joint name. Models that need
+        deterministic, paper-fair velocity normalization can declare
+        per-joint vmax in ``mujoco_feagi_mappings.json`` under
+        ``joint_velocity_max`` instead of relying on the qpos-range fallback.
+        """
+        sanitized = _sanitize_name(joint_name)
+        if not sanitized:
+            return None
+        candidate = self.joint_velocity_max.get(sanitized)
+        if isinstance(candidate, (int, float)) and np.isfinite(float(candidate)):
+            value = float(candidate)
+            if value > 0.0:
+                return value
+        return None
+
 
 def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
     """Load optional per-model mapping table next to the model XML entry file."""
@@ -159,6 +251,11 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         motor_control_contracts={},
         vision_camera_overrides=[],
         vision_peripheral_resolution=None,
+        sensor_cutoffs={},
+        joint_velocity_max={},
+        spatial_pointer=None,
+        spatial_pointer_ee_site="link_tcp",
+        spatial_pointer_arm_dof_count=6,
     )
     if not os.path.isfile(mapping_path):
         logger.info("[NAME_MAP] No per-model mapping found at %s", mapping_path)
@@ -178,6 +275,8 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
     raw_motor_control_contracts = payload.get("motor_control_contracts", {})
     raw_vision_camera_overrides = payload.get("vision_camera_overrides", [])
     raw_vision_peripheral_resolution = payload.get("vision_peripheral_resolution")
+    raw_sensor_cutoffs = payload.get("sensor_cutoffs", {})
+    raw_joint_velocity_max = payload.get("joint_velocity_max", {})
     incremental_step_ratios: dict[str, float] = {}
     if isinstance(raw_incremental_step_ratios, dict):
         for key, value in raw_incremental_step_ratios.items():
@@ -245,6 +344,63 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
             if width > 0 and height > 0:
                 vision_peripheral_resolution = (width, height)
 
+    # Per-sensor IMU saturation overrides. Map key = sanitized sensor name,
+    # value = positive finite cutoff magnitude in the sensor's native units
+    # (m/s^2 for accelerometer, rad/s for gyro, unitless for magnetometer).
+    # See `_build_sensor_registration_map` for the JSON > XML > autoscale
+    # precedence chain.
+    sensor_cutoffs: dict[str, float] = {}
+    if isinstance(raw_sensor_cutoffs, dict):
+        for key, value in raw_sensor_cutoffs.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                cutoff_val = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(cutoff_val) or cutoff_val <= 0.0:
+                continue
+            sanitized_key = _sanitize_name(key)
+            if not sanitized_key:
+                continue
+            sensor_cutoffs[sanitized_key] = cutoff_val
+
+    # Per-joint velocity normalization references. Map key = sanitized
+    # MuJoCo joint name, value = positive finite vmax magnitude in the
+    # joint's native units (rad/s for hinge, m/s for slide). When set,
+    # this overrides the qpos-range fallback used to normalize qvel for
+    # the corresponding scalar IPU.
+    joint_velocity_max: dict[str, float] = {}
+    if isinstance(raw_joint_velocity_max, dict):
+        for key, value in raw_joint_velocity_max.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                vmax_val = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(vmax_val) or vmax_val <= 0.0:
+                continue
+            sanitized_key = _sanitize_name(key)
+            if not sanitized_key:
+                continue
+            joint_velocity_max[sanitized_key] = vmax_val
+
+    spatial_pointer = None
+    spatial_pointer_raw = payload.get("spatial_pointer")
+    if spatial_pointer_raw is not None:
+        spatial_pointer = parse_spatial_pointer_block(spatial_pointer_raw)
+    spatial_pointer_ee_site = "link_tcp"
+    raw_ee_site = payload.get("spatial_pointer_ee_site")
+    if isinstance(raw_ee_site, str) and raw_ee_site.strip():
+        spatial_pointer_ee_site = _sanitize_name(raw_ee_site.strip())
+    spatial_pointer_arm_dof_count = 6
+    raw_arm_dof = payload.get("spatial_pointer_arm_dof_count")
+    if isinstance(raw_arm_dof, int) and not isinstance(raw_arm_dof, bool):
+        if raw_arm_dof <= 0:
+            raise ValueError("spatial_pointer_arm_dof_count must be > 0.")
+        spatial_pointer_arm_dof_count = int(raw_arm_dof)
+
     translator = MujocoNameTranslator(
         mapping_path=mapping_path,
         model_joints=model_joints if isinstance(model_joints, dict) else {},
@@ -255,9 +411,17 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         motor_control_contracts=motor_control_contracts,
         vision_camera_overrides=vision_camera_overrides,
         vision_peripheral_resolution=vision_peripheral_resolution,
+        sensor_cutoffs=sensor_cutoffs,
+        joint_velocity_max=joint_velocity_max,
+        spatial_pointer=spatial_pointer,
+        spatial_pointer_ee_site=spatial_pointer_ee_site,
+        spatial_pointer_arm_dof_count=spatial_pointer_arm_dof_count,
     )
     logger.info(
-        "[NAME_MAP] Loaded per-model mappings from %s (joints=%d actuators=%d sensors=%d sources=%d incremental_scales=%d contracts=%d vision_overrides=%d)",
+        "[NAME_MAP] Loaded per-model mappings from %s "
+        "(joints=%d actuators=%d sensors=%d sources=%d incremental_scales=%d "
+        "contracts=%d vision_overrides=%d sensor_cutoffs=%d "
+        "joint_velocity_max=%d)",
         mapping_path,
         len(translator.model_joints),
         len(translator.model_actuators),
@@ -266,6 +430,8 @@ def _load_mujoco_name_translator(model_xml_path: str) -> MujocoNameTranslator:
         len(translator.incremental_step_ratios),
         len(translator.motor_control_contracts),
         len(translator.vision_camera_overrides),
+        len(translator.sensor_cutoffs),
+        len(translator.joint_velocity_max),
     )
     return translator
 
@@ -822,6 +988,18 @@ class SensorRegistration:
     bundle_id: str
     bundle_type: str
     source_entity: str
+    frame_change_handling: Literal["absolute", "incremental"] = "absolute"
+    #: When set, this registration participates in grouped Servo cache strips
+    #: aligned with ``motor_positional_servo_register`` for the same
+    #: ``CorticalUnitIndex``: one ``N``-channel strip for joint position and
+    #: one ``N``-channel strip for joint velocity (qvel), each channel
+    #: index ``0..N-1`` matching the motor OPU channel order. Both strips use
+    #: **absolute** frame in device_registration / cache so FEAGI does not
+    #: create unused incremental sensory Servo peers.
+    #: The same indexes apply to grouped ``Proximity`` joint-velocity strips
+    #: (one ``N``-channel cortical area per limb for ``jointvel`` scalars).
+    motor_servo_group_id: Optional[int] = None
+    motor_servo_channel_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -844,6 +1022,94 @@ class JointLimitGuard:
     qvel_addr: int
     lower: float
     upper: float
+
+
+# IMU autoscale hyperparameters.
+# @architecture:acceptable - IMU auto-normalization signal processing
+# These are signal-processing constants (floors, decay, safety factor) used as
+# a final fallback when neither the mapping JSON's `sensor_cutoffs` nor the
+# MuJoCo XML `<sensor cutoff>` attribute declares a saturation reference for
+# an IMU axis. They enable zero-config RawIMU neural activity during the
+# babbling phase of a new model; experimenters needing deterministic
+# reproducibility should declare explicit cutoffs via either mechanism.
+_IMU_AUTOSCALE_DECAY: Final[float] = 0.9995
+_IMU_AUTOSCALE_SAFETY_FACTOR: Final[float] = 1.1
+_IMU_AUTOSCALE_FLOOR_BY_MODALITY: Final[dict[str, float]] = {
+    "accelerometer": 1.0,   # m/s^2 (a tenth of Earth gravity)
+    "gyro": 0.1,            # rad/s (~5.7 deg/s)
+    "magnetometer": 1.0,    # unitless normalized field
+}
+
+
+@dataclass
+class IMUAxisAutoscaleState:
+    """
+    Per-sensor Exponential Moving Max (EMM) state for IMU axis autoscaling.
+
+    Shared across all three axes of a single MuJoCo IMU sensor because the
+    device's dynamic range is a property of the sensor as a whole, not a
+    per-axis property. Intentionally mutable; referenced from a frozen
+    ``IMUAxisRuntime`` via an immutable reference to a mutable object so that
+    discovery-time metadata stays immutable while runtime state evolves.
+    """
+
+    modality: str
+    floor: float
+    emm: float = 0.0
+    warned: bool = False
+
+    def update_divisor(self, abs_max_now: float) -> float:
+        """Advance EMM with the tick's abs-max magnitude; return active divisor."""
+        self.emm = max(self.emm * _IMU_AUTOSCALE_DECAY, abs_max_now)
+        return max(self.floor, self.emm * _IMU_AUTOSCALE_SAFETY_FACTOR)
+
+
+@dataclass(frozen=True)
+class IMUAxisRuntime:
+    """
+    Per-axis runtime metadata for one MuJoCo IMU sensor.
+
+    ``cutoff`` is the effective saturation magnitude chosen at discovery time
+    by the precedence chain ``sensor_cutoffs[json] > xml cutoff > 0.0``. When
+    ``cutoff > 0`` the axis is normalized deterministically against it.
+
+    ``autoscale`` is populated only when neither the mapping JSON nor the XML
+    declares a cutoff, in which case the runtime loop falls back to an
+    adaptive EMM autoscale (see ``_normalize_imu_axis_triple``). The two
+    fields are mutually exclusive by construction: exactly one of
+    ``cutoff > 0`` or ``autoscale is not None`` is true for any usable axis.
+    """
+
+    sensor_name: str
+    sensor_tag: str
+    sensor_index: int
+    start_index: int
+    cutoff: float
+    autoscale: Optional[IMUAxisAutoscaleState] = None
+
+
+@dataclass(frozen=True)
+class RawIMURuntimeChannel:
+    """
+    One RawIMU cortical channel = one MuJoCo `site` carrying any of
+    accelerometer / gyroscope / magnetometer sensors. Missing axes are
+    represented by ``None`` and skipped at write-time (partial-write API).
+    """
+
+    site_name: str
+    accelerometer: Optional[IMUAxisRuntime]
+    gyroscope: Optional[IMUAxisRuntime]
+    magnetometer: Optional[IMUAxisRuntime]
+
+
+@dataclass(frozen=True)
+class SmartIMURuntimeChannel:
+    """One SmartIMU cortical channel = one MuJoCo orientation quaternion sensor."""
+
+    sensor_name: str
+    sensor_tag: str
+    sensor_index: int
+    start_index: int
 
 
 def parse_sensor_metadata_from_xml(xml_path: str) -> list[dict[str, str]]:
@@ -930,12 +1196,70 @@ def _resolve_sensor_source_entity(model, sensor_index: int) -> str:
     return f"sensor_{sensor_index}"
 
 
+def _resolve_sensor_site_name(model, sensor_index: int) -> Optional[str]:
+    """
+    Return the MuJoCo `site` name a sensor is attached to, or ``None``.
+
+    Used to bundle the three RawIMU axes (accelerometer / gyroscope /
+    magnetometer) into a single cortical channel keyed by physical site,
+    independent of how each individual ``<sensor>`` element was named.
+    Returns ``None`` for sensors that do not target a site (e.g. joint or
+    body sensors), in which case the caller falls back to the sensor's own
+    name as the bundle key.
+    """
+    try:
+        obj_type_value = int(model.sensor_objtype[sensor_index])
+        obj_type_name = _enum_name_or_value(mujoco.mjtObj, obj_type_value)
+        obj_id = int(model.sensor_objid[sensor_index])
+    except Exception:
+        return None
+    if obj_type_name != "mjOBJ_SITE" or obj_id < 0:
+        return None
+    try:
+        return _sanitize_name(model.site(obj_id).name or f"site_{obj_id}")
+    except Exception:
+        return None
+
+
+def _sensor_cutoff_or_zero(model, sensor_index: int) -> float:
+    """
+    Return the MuJoCo `<sensor>`'s `cutoff` saturation magnitude, or 0.0.
+
+    A zero cutoff (the MuJoCo default when omitted) signals the model did not
+    declare a saturation reference, so the controller cannot deterministically
+    normalize the axis into ``[-1, 1]``. The runtime IMU loop uses this to
+    decide whether to skip the axis (no fallback normalization) - this is the
+    same "leave unwritten" policy the user chose for missing axes.
+    """
+    try:
+        return float(model.sensor_cutoff[sensor_index])
+    except Exception:
+        return 0.0
+
+
 def _sensor_tag_to_feagi_unit(sensor_tag: str) -> Optional[str]:
+    """
+    Map a normalized MuJoCo sensor tag to its FEAGI sensory cortical unit.
+
+    IMU mapping policy (no Shock association):
+      * Linear three-axis IMU sensors (`accelerometer`, `gyro`,
+        `magnetometer`) feed the composite ``RawIMU`` unit. They are bundled
+        per MuJoCo `site` by `_build_sensor_registration_map`, NOT
+        registered as standalone scalar units.
+      * Orientation quaternion sensors (`framequat`, `ballquat`) feed the
+        ``SmartIMU`` unit (one cortical channel per quaternion sensor).
+      * The legacy ``Shock`` unit is no longer used as the home for any IMU
+        signal; the previous ``accelerometer -> Shock`` and
+        ``gyro/framequat/magnetometer -> Gyroscope`` rules are intentionally
+        removed.
+    """
     normalized = sensor_tag.lower()
     if normalized in ("rangefinder", "camprojection", "camdistance"):
         return "Vision"
-    if normalized in ("framequat", "gyro", "ballquat", "magnetometer"):
-        return "Gyroscope"
+    if normalized in ("accelerometer", "gyro", "magnetometer"):
+        return "RawIMU"
+    if normalized in ("framequat", "ballquat"):
+        return "SmartIMU"
     if normalized in ("jointpos", "tendonpos", "actuatorpos"):
         return "Servo"
     if normalized in (
@@ -957,8 +1281,6 @@ def _sensor_tag_to_feagi_unit(sensor_tag: str) -> Optional[str]:
         "subtreeangmom",
     ):
         return "Proximity"
-    if normalized in ("accelerometer",):
-        return "Shock"
     if normalized in ("force", "torque", "actuatorfrc"):
         return "MiscData"
     return None
@@ -968,8 +1290,14 @@ def _sensor_tag_to_signal_type(sensor_tag: str) -> str:
     normalized = sensor_tag.lower()
     if normalized in ("rangefinder", "camprojection", "camdistance"):
         return "vision"
-    if normalized in ("framequat", "gyro", "magnetometer"):
-        return "gyroscope"
+    if normalized == "accelerometer":
+        return "raw_imu_accelerometer"
+    if normalized == "gyro":
+        return "raw_imu_gyroscope"
+    if normalized == "magnetometer":
+        return "raw_imu_magnetometer"
+    if normalized in ("framequat", "ballquat"):
+        return "smart_imu_quaternion"
     if normalized in ("jointpos", "tendonpos", "actuatorpos"):
         return "servo_encoder"
     if normalized in (
@@ -991,8 +1319,6 @@ def _sensor_tag_to_signal_type(sensor_tag: str) -> str:
         "subtreeangmom",
     ):
         return "proximity"
-    if normalized in ("accelerometer",):
-        return "shock"
     if normalized in ("force", "torque", "actuatorfrc"):
         return "misc_data"
     return normalized
@@ -1037,15 +1363,38 @@ def _build_sensor_registration_map(
     xml_path: str,
     strict_mode: bool = True,
     name_translator: Optional[MujocoNameTranslator] = None,
-) -> tuple[dict[str, list[SensorRegistration]], list[RuntimeSensorChannel]]:
+) -> tuple[
+    dict[str, list[SensorRegistration]],
+    list[RuntimeSensorChannel],
+    dict[str, RawIMURuntimeChannel],
+    dict[str, SmartIMURuntimeChannel],
+]:
     """
     Build deterministic sensory registration entries and runtime channel layout.
 
     Uses XML metadata for semantic names and MuJoCo runtime metadata for dimensions.
+
+    Returns four artifacts:
+      * ``by_unit``: registration metadata grouped by FEAGI cortical unit key.
+      * ``runtime_channels``: per-axis scalar runtime channel descriptors used
+        by the existing scalar write loop. RawIMU/SmartIMU sensors are
+        intentionally NOT added here because their cache has a typed
+        (non-scalar) write surface.
+      * ``raw_imu_channels``: keyed by MuJoCo ``site`` name, bundles all axes
+        (accelerometer / gyroscope / magnetometer) attached to that site.
+      * ``smart_imu_channels``: keyed by sensor name, one entry per
+        orientation-quaternion sensor (``framequat`` / ``ballquat``).
     """
     by_unit: dict[str, list[SensorRegistration]] = {}
     runtime_channels: list[RuntimeSensorChannel] = []
     unsupported_sensor_types: dict[str, int] = {}
+
+    # IMU bundling state, keyed by site name (RawIMU) and sensor name (SmartIMU).
+    raw_imu_axes_by_site: dict[str, dict[str, IMUAxisRuntime]] = {}
+    raw_imu_site_display: dict[str, str] = {}
+    raw_imu_site_source_entity: dict[str, str] = {}
+    smart_imu_channels: dict[str, SmartIMURuntimeChannel] = {}
+    smart_imu_registrations: dict[str, SensorRegistration] = {}
 
     # Runtime-discovered sensors from the compiled MuJoCo model.
     for sensor_index in range(model.nsensor):
@@ -1068,6 +1417,91 @@ def _build_sensor_registration_map(
         source_entity = _resolve_sensor_source_entity(model, sensor_index)
         if name_translator is not None:
             source_entity = name_translator.translate_source_entity(source_entity)
+        sensor_dim = int(model.sensor_dim[sensor_index])
+        sensor_addr = int(model.sensor_adr[sensor_index])
+
+        # RawIMU: bundle all linear-axis sensors attached to the same site.
+        if unit_key == "RawIMU":
+            site_name = _resolve_sensor_site_name(model, sensor_index)
+            if site_name is None:
+                # Sensor is not attached to a site - fall back to the sensor
+                # name itself so each unsited IMU axis still gets its own
+                # cortical channel rather than being silently merged.
+                site_name = sensor_name
+            site_display = site_name
+            if name_translator is not None:
+                site_display = name_translator.translate_source_entity(site_name)
+            raw_imu_site_display.setdefault(site_name, site_display)
+            raw_imu_site_source_entity.setdefault(site_name, source_entity)
+            axis_kind = sensor_tag.lower()
+            site_axes = raw_imu_axes_by_site.setdefault(site_name, {})
+            if axis_kind in site_axes:
+                # MuJoCo lets a model declare two sensors of the same kind on
+                # the same site; the second definition would otherwise silently
+                # shadow the first. Surface this loudly so the model author
+                # can deduplicate before runtime.
+                raise RuntimeError(
+                    "Duplicate RawIMU axis on a single site: "
+                    f"site='{site_name}' axis='{axis_kind}' "
+                    f"sensor='{sensor_name}'"
+                )
+            # Precedence: mapping-JSON override > MuJoCo XML cutoff > adaptive
+            # EMM autoscale. The JSON override is authoritative-per-model for
+            # experimenters who need deterministic normalization; the XML
+            # cutoff is authoritative-per-sensor when the model declares one;
+            # otherwise we fall back to the controller-wide autoscale.
+            override_cutoff: Optional[float] = None
+            if name_translator is not None:
+                candidate = name_translator.sensor_cutoffs.get(sensor_name)
+                if (
+                    isinstance(candidate, (int, float))
+                    and np.isfinite(float(candidate))
+                    and float(candidate) > 0.0
+                ):
+                    override_cutoff = float(candidate)
+            xml_cutoff = _sensor_cutoff_or_zero(model, sensor_index)
+            if override_cutoff is not None:
+                effective_cutoff = override_cutoff
+                autoscale_state: Optional[IMUAxisAutoscaleState] = None
+            elif xml_cutoff > 0.0:
+                effective_cutoff = xml_cutoff
+                autoscale_state = None
+            else:
+                effective_cutoff = 0.0
+                autoscale_state = IMUAxisAutoscaleState(
+                    modality=axis_kind,
+                    floor=_IMU_AUTOSCALE_FLOOR_BY_MODALITY.get(axis_kind, 1.0),
+                )
+
+            site_axes[axis_kind] = IMUAxisRuntime(
+                sensor_name=sensor_name,
+                sensor_tag=sensor_tag,
+                sensor_index=sensor_index,
+                start_index=sensor_addr,
+                cutoff=effective_cutoff,
+                autoscale=autoscale_state,
+            )
+            continue
+
+        # SmartIMU: each orientation-quaternion sensor becomes its own channel.
+        if unit_key == "SmartIMU":
+            registration = SensorRegistration(
+                sensor_name=sensor_name,
+                display_name=display_name,
+                sensor_tag=sensor_tag,
+                bundle_id=sensor_name,
+                bundle_type=bundle_type,
+                source_entity=source_entity,
+            )
+            smart_imu_registrations[sensor_name] = registration
+            smart_imu_channels[sensor_name] = SmartIMURuntimeChannel(
+                sensor_name=sensor_name,
+                sensor_tag=sensor_tag,
+                sensor_index=sensor_index,
+                start_index=sensor_addr,
+            )
+            continue
+
         registration = SensorRegistration(
             sensor_name=sensor_name,
             display_name=display_name,
@@ -1078,8 +1512,6 @@ def _build_sensor_registration_map(
         )
         by_unit.setdefault(unit_key, []).append(registration)
 
-        sensor_dim = int(model.sensor_dim[sensor_index])
-        sensor_addr = int(model.sensor_adr[sensor_index])
         runtime_channels.append(
             RuntimeSensorChannel(
                 sensor_name=sensor_name,
@@ -1088,6 +1520,38 @@ def _build_sensor_registration_map(
                 start_index=sensor_addr,
                 length=max(sensor_dim, 1),
             )
+        )
+
+    # Materialize one RawIMU registration per discovered site, in deterministic
+    # site-name order. Each site becomes one cortical channel; missing axes are
+    # left unset (handled by the partial-write API at runtime).
+    raw_imu_channels: dict[str, RawIMURuntimeChannel] = {}
+    for site_name in sorted(raw_imu_axes_by_site.keys()):
+        axes = raw_imu_axes_by_site[site_name]
+        site_display = raw_imu_site_display.get(site_name, site_name)
+        site_source_entity = raw_imu_site_source_entity.get(site_name, site_name)
+        by_unit.setdefault("RawIMU", []).append(
+            SensorRegistration(
+                sensor_name=site_name,
+                display_name=site_display,
+                sensor_tag="raw_imu",
+                bundle_id=site_name,
+                bundle_type="imu",
+                source_entity=site_source_entity,
+            )
+        )
+        raw_imu_channels[site_name] = RawIMURuntimeChannel(
+            site_name=site_name,
+            accelerometer=axes.get("accelerometer"),
+            gyroscope=axes.get("gyro"),
+            magnetometer=axes.get("magnetometer"),
+        )
+
+    # Promote SmartIMU registrations into the unified registration map in
+    # sensor-name order so cortical channel indices are deterministic.
+    for sensor_name in sorted(smart_imu_registrations.keys()):
+        by_unit.setdefault("SmartIMU", []).append(
+            smart_imu_registrations[sensor_name]
         )
 
     # Deterministic derived channels for models that don't define explicit <sensor> blocks.
@@ -1113,21 +1577,11 @@ def _build_sensor_registration_map(
 
         qpos_addr = int(model.jnt_qposadr[joint_id])
         joint_pos_name = f"jointpos_{joint_name}"
-        joint_pos_display_name = f"servo_encoder_position_{display_joint_name}"
-        if name_translator is not None:
-            joint_pos_display_name = name_translator.translate_sensor(
-                joint_pos_name
-            ) if joint_pos_name in name_translator.model_sensors else joint_pos_display_name
-        by_unit.setdefault("Servo", []).append(
-            SensorRegistration(
-                sensor_name=joint_pos_name,
-                display_name=joint_pos_display_name,
-                sensor_tag="jointpos",
-                bundle_id=joint_pos_name,
-                bundle_type="sensor_array",
-                source_entity=display_joint_name,
-            )
-        )
+        # Per-joint Servo encoder *metadata* is intentionally omitted here.
+        # `_align_servo_encoder_registrations_with_motors` rebuilds Servo from
+        # positional motor groups (one wide strip per arm per frame mode). Adding
+        # rows here caused duplicate cortical areas (legacy 1x1x10 per joint plus
+        # grouped Nx1x10 strips). Legacy fallback exists when mirroring cannot run.
         runtime_channels.append(
             RuntimeSensorChannel(
                 sensor_name=joint_pos_name,
@@ -1158,6 +1612,28 @@ def _build_sensor_registration_map(
                 source_entity=display_joint_name,
             )
         )
+        # Incremental Servo encoder metadata: see jointpos comment above (motor-parity mirror).
+        # Velocity normalization reference precedence:
+        #   1) ``joint_velocity_max`` from the model overrides JSON, when
+        #      the model author has declared a per-joint vmax (preferred,
+        #      paper-deterministic).
+        #   2) ``range_span`` (qpos max - min) as a generic fallback. This
+        #      is dimensionally wrong for qvel but keeps default behavior
+        #      stable for models without an override.
+        #   3) ``signed_0_1`` is disabled when neither of the above is
+        #      finite (joint has no qpos range and no override).
+        override_vmax: Optional[float] = None
+        if name_translator is not None:
+            override_vmax = name_translator.joint_velocity_max_for(joint_name)
+        if override_vmax is not None:
+            qvel_normalize_mode = "signed_0_1"
+            qvel_normalize_reference = override_vmax
+        elif has_finite_range:
+            qvel_normalize_mode = "signed_0_1"
+            qvel_normalize_reference = range_span
+        else:
+            qvel_normalize_mode = "none"
+            qvel_normalize_reference = 0.0
         runtime_channels.append(
             RuntimeSensorChannel(
                 sensor_name=joint_vel_name,
@@ -1165,8 +1641,8 @@ def _build_sensor_registration_map(
                 source_kind="qvel",
                 start_index=qvel_addr,
                 length=1,
-                normalize_mode="signed_0_1" if has_finite_range else "none",
-                normalize_reference=range_span if has_finite_range else 0.0,
+                normalize_mode=qvel_normalize_mode,
+                normalize_reference=qvel_normalize_reference,
             )
         )
 
@@ -1215,7 +1691,7 @@ def _build_sensor_registration_map(
     for unit_key, entries in by_unit.items():
         by_unit[unit_key] = sorted(entries, key=lambda entry: entry.sensor_name)
     runtime_channels.sort(key=lambda channel: (channel.start_index, channel.sensor_name))
-    return by_unit, runtime_channels
+    return by_unit, runtime_channels, raw_imu_channels, smart_imu_channels
 
 
 def _infer_bundle_type(bundle_name: str, labels: list[str]) -> str:
@@ -1269,13 +1745,88 @@ def _ensure_motor_registration_io_flags(unit_def: dict) -> None:
     )
 
 
+def _enrich_misc_reset_entry(
+    entry: list,
+    source_model: str,
+) -> None:
+    """
+    Populate required string fields for a MiscData reset-trigger registration.
+
+    FEAGI's SDK validator requires non-empty strings for the unit/channel
+    friendly names and device_properties fields. The Rust cache emits those as
+    null, so the controller must fill them deterministically.
+    """
+    if not isinstance(entry, list) or not entry:
+        return
+    unit_def = entry[0]
+    if not isinstance(unit_def, dict):
+        return
+    unit_def.setdefault("friendly_name", MISC_RESET_UNIT_FRIENDLY_NAME)
+    if not isinstance(unit_def.get("friendly_name"), str) or not unit_def["friendly_name"]:
+        unit_def["friendly_name"] = MISC_RESET_UNIT_FRIENDLY_NAME
+    device_grouping = unit_def.get("device_grouping")
+    if not isinstance(device_grouping, list) or not device_grouping:
+        return
+    for channel_idx, channel in enumerate(device_grouping):
+        if not isinstance(channel, dict):
+            continue
+        channel_name = (
+            MISC_RESET_CHANNEL_FRIENDLY_NAME
+            if len(device_grouping) == 1
+            else f"{MISC_RESET_CHANNEL_FRIENDLY_NAME}_{channel_idx}"
+        )
+        channel["friendly_name"] = channel_name
+        device_properties = channel.get("device_properties")
+        if not isinstance(device_properties, dict):
+            device_properties = {}
+        device_properties.update(
+            {
+                "bundle_type": MISC_RESET_BUNDLE_TYPE,
+                "bundle_id": MISC_RESET_BUNDLE_ID,
+                "modality": "motor",
+                "signal_type": MISC_RESET_SIGNAL_TYPE,
+                "source_model": source_model,
+                "source_entity": MISC_RESET_SOURCE_ENTITY,
+                "naming_schema_version": "1",
+            }
+        )
+        channel["device_properties"] = device_properties
+
+
+def _sensory_entry_cortical_unit_index(entry: object) -> int:
+    """Return ``cortical_unit_index`` from a sensory ``input_units`` entry for stable sorting."""
+    if not isinstance(entry, list) or not entry:
+        return 1 << 24
+    unit_def = entry[0]
+    if not isinstance(unit_def, dict):
+        return 1 << 24
+    raw = unit_def.get("cortical_unit_index")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return 1 << 24
+    return 1 << 24
+
+
 def _build_motor_registration_enricher(
     model_xml: str,
     group_names: list[str],
     group_channel_metadata: dict[int, dict[str, list[dict[str, str]]]],
     sensory_registration_metadata: dict[str, list[SensorRegistration]],
+    misc_reset_group_ids: Optional[set[int]] = None,
+    sensory_registration_by_group_id: Optional[
+        dict[str, dict[int, SensorRegistration]]
+    ] = None,
 ) -> Callable[[dict], dict]:
     source_model = os.path.abspath(model_xml)
+    misc_reset_ids: set[int] = set(misc_reset_group_ids or set())
+    sensory_by_group: dict[str, dict[int, SensorRegistration]] = {
+        unit_key: dict(group_map)
+        for unit_key, group_map in (sensory_registration_by_group_id or {}).items()
+    }
 
     def enrich(registrations: dict) -> dict:
         output_units = registrations.get("output_units_and_decoder_properties")
@@ -1283,6 +1834,19 @@ def _build_motor_registration_enricher(
             return registrations
 
         for unit_key, entries in output_units.items():
+            if str(unit_key) == "MiscData" and isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, list) or not entry:
+                        continue
+                    unit_def = entry[0]
+                    if not isinstance(unit_def, dict):
+                        continue
+                    group_id = unit_def.get("cortical_unit_index")
+                    if not isinstance(group_id, int) or group_id not in misc_reset_ids:
+                        continue
+                    _enrich_misc_reset_entry(entry, source_model)
+                continue
+
             canonical_unit = _canonical_motor_unit_key(str(unit_key))
             if canonical_unit is None or not isinstance(entries, list):
                 continue
@@ -1374,11 +1938,30 @@ def _build_motor_registration_enricher(
             for unit_key, entries in sorted(input_units.items()):
                 if not isinstance(entries, list) or not entries:
                     continue
+                entries_for_walk = sorted(
+                    enumerate(entries),
+                    key=lambda pair: (
+                        _sensory_entry_cortical_unit_index(pair[1]),
+                        pair[0],
+                    ),
+                )
+                # Two parallel lookup tables for the same unit_key:
+                #   * ``unit_registrations`` (legacy, sorted) is used for
+                #     composite cortical units (RawIMU, SmartIMU, Vision)
+                #     where one cortical area carries multiple channels and
+                #     we walk the channels with a cursor.
+                #   * ``group_to_registration`` is used for scalar units
+                #     where each registration owns its own cortical area.
+                #     Its keying by ``cortical_unit_index`` makes the
+                #     mapping order-independent of how the Rust cache
+                #     happens to serialize the entries (HashMap iteration
+                #     order is not stable across processes).
                 unit_registrations = list(
                     sensory_registration_metadata.get(str(unit_key), [])
                 )
+                group_to_registration = sensory_by_group.get(str(unit_key), {})
                 metadata_cursor = 0
-                for unit_idx, entry in enumerate(entries):
+                for unit_idx, (_orig_entry_index, entry) in enumerate(entries_for_walk):
                     if not isinstance(entry, list) or not entry:
                         continue
                     unit_def = entry[0]
@@ -1387,19 +1970,53 @@ def _build_motor_registration_enricher(
                     grouping = unit_def.get("device_grouping")
                     if not isinstance(grouping, list):
                         continue
-                    unit_friendly_name = str(unit_key).lower()
-                    if metadata_cursor < len(unit_registrations):
-                        unit_friendly_name = unit_registrations[metadata_cursor].display_name
+                    cortical_unit_index_raw = unit_def.get("cortical_unit_index")
+                    cortical_unit_index: Optional[int] = None
+                    if isinstance(cortical_unit_index_raw, int):
+                        cortical_unit_index = cortical_unit_index_raw
+                    elif isinstance(cortical_unit_index_raw, str):
+                        try:
+                            cortical_unit_index = int(cortical_unit_index_raw)
+                        except ValueError:
+                            cortical_unit_index = None
+                    # Pick the right registration for THIS cortical unit.
+                    # Prefer the explicit group-id lookup when available;
+                    # fall back to the cursor walk for composite units that
+                    # share a single cortical area across channels.
+                    use_group_lookup = (
+                        cortical_unit_index is not None
+                        and cortical_unit_index in group_to_registration
+                    )
+                    unit_registration: Optional[SensorRegistration] = None
+                    if use_group_lookup:
+                        unit_registration = group_to_registration[
+                            cortical_unit_index
+                        ]
+                    elif metadata_cursor < len(unit_registrations):
+                        unit_registration = unit_registrations[metadata_cursor]
+                    if unit_registration is not None:
+                        unit_friendly_name = unit_registration.display_name
                     elif len(entries) > 1:
                         unit_friendly_name = f"{str(unit_key).lower()}_{unit_idx}"
+                    else:
+                        unit_friendly_name = str(unit_key).lower()
                     unit_def["friendly_name"] = unit_friendly_name
                     for channel_idx, channel in enumerate(grouping):
                         if not isinstance(channel, dict):
                             continue
                         sensor: Optional[SensorRegistration] = None
-                        if metadata_cursor < len(unit_registrations):
-                            sensor = unit_registrations[metadata_cursor]
-                        metadata_cursor += 1
+                        if use_group_lookup:
+                            # Scalar unit: every channel in this cortical
+                            # area belongs to the same registration that
+                            # owns the unit. The cursor is intentionally
+                            # NOT advanced because the by-group lookup
+                            # short-circuits it; advancing here would
+                            # silently desynchronise the composite path.
+                            sensor = unit_registration
+                        else:
+                            if metadata_cursor < len(unit_registrations):
+                                sensor = unit_registrations[metadata_cursor]
+                            metadata_cursor += 1
                         if sensor is None:
                             sensor = SensorRegistration(
                                 sensor_name=f"{str(unit_key).lower()}_{unit_idx}_{channel_idx}",
@@ -1426,26 +2043,613 @@ def _build_motor_registration_enricher(
                                 "naming_schema_version": "1",
                             }
                         )
+                        if sensor.motor_servo_group_id is not None:
+                            device_properties["motor_servo_group_id"] = int(
+                                sensor.motor_servo_group_id
+                            )
                         channel["device_properties"] = device_properties
         return registrations
 
     return enrich
 
 
+# Scalar sensor unit keys whose registrations represent independent
+# observations: each registration becomes its own cortical area
+# (channel_count=1) so the brain has one cortical unit per scalar source
+# (e.g. one area per joint qpos / qvel / actuator force, one area per
+# discrete shock channel). ``Servo`` is exempt when every registration
+# carries ``motor_servo_group_id`` (motor-parity grouped strips).
+# ``Proximity`` is exempt for ``jointvel`` rows that share the same
+# ``motor_servo_group_id`` (one ``N``-channel area per limb). Composite
+# unit keys (Vision, RawIMU, SmartIMU) keep their existing
+# one-area-with-N-channels layout because their channel structure carries
+# spatial / multi-axis semantics that a split would erase.
+_SCALAR_PER_REGISTRATION_SENSOR_UNIT_KEYS: frozenset[str] = frozenset(
+    {"Servo", "Proximity", "Shock", "MiscData"}
+)
+
+
 def register_mujoco_sensors_in_cache(
     sensor_registration_map: dict[str, list[SensorRegistration]],
     group_index_start: int = 0,
-) -> dict[str, int]:
-    """Register MuJoCo sensors in cache via Python SDK abstractions."""
-    unit_counts = {
-        unit_key: len(registrations)
-        for unit_key, registrations in sorted(sensor_registration_map.items())
-    }
-    return brain_output.register_sensor_units(
-        unit_counts,
-        z_neuron_resolution=10,
-        group_index_start=group_index_start,
+) -> dict[str, list[int]]:
+    """Register MuJoCo sensors in cache via Python SDK abstractions.
+
+    Servo encoders mirrored from positional motors use **two** cache groups per
+    motor ``CorticalUnitIndex``: an ``N``-channel strip for joint position and
+    an ``N``-channel strip for joint velocity (same sizes as the dual OPU layout
+    of ``motor_positional_servo_register``). Both register as absolute-frame
+    sensory Servo for FEAGI auto-create and device_registration consistency.
+
+    Other scalar units (Proximity, Shock, MiscData) register one cortical area per
+    registration, except Proximity ``jointvel`` rows tagged with
+    ``motor_servo_group_id``: those share one ``N``-channel area per motor group
+    (same channel order as positional servo OPUs). Composite units (Vision,
+    RawIMU, SmartIMU) keep their one-area-with-N-channels layout.
+
+    Returns:
+        Mapping of unit_key -> list of assigned cache group indices, one
+        entry per cortical area created for that unit_key.
+    """
+    unit_groups: dict[str, list[int]] = {}
+    next_group = int(group_index_start)
+    servo_incremental_downgraded = 0
+    for unit_key in sorted(sensor_registration_map.keys()):
+        registrations = sensor_registration_map[unit_key]
+        if not registrations:
+            continue
+        if unit_key in _SCALAR_PER_REGISTRATION_SENSOR_UNIT_KEYS:
+            if unit_key == "Servo" and _servo_registrations_use_motor_groups(registrations):
+                assigned: list[int] = []
+                motor_group_ids = sorted(
+                    {
+                        registration.motor_servo_group_id
+                        for registration in registrations
+                        if registration.motor_servo_group_id is not None
+                    }
+                )
+                for motor_gid in motor_group_ids:
+                    group_regs = [
+                        registration
+                        for registration in registrations
+                        if registration.motor_servo_group_id == motor_gid
+                    ]
+                    pos_regs = sorted(
+                        (r for r in group_regs if r.sensor_tag == "jointpos"),
+                        key=lambda r: r.motor_servo_channel_index,
+                    )
+                    vel_regs = sorted(
+                        (r for r in group_regs if r.sensor_tag == "jointvel"),
+                        key=lambda r: r.motor_servo_channel_index,
+                    )
+                    if len(pos_regs) != len(vel_regs):
+                        raise RuntimeError(
+                            "Grouped Servo motor group "
+                            f"{motor_gid}: jointpos count {len(pos_regs)} != "
+                            f"jointvel count {len(vel_regs)}."
+                        )
+                    for pr, vr in zip(pos_regs, vel_regs):
+                        if pr.motor_servo_channel_index != vr.motor_servo_channel_index:
+                            raise RuntimeError(
+                                "Grouped Servo motor group "
+                                f"{motor_gid}: jointpos / jointvel channel index "
+                                f"mismatch ({pr.motor_servo_channel_index} vs "
+                                f"{vr.motor_servo_channel_index})."
+                            )
+                    channel_count = len(pos_regs)
+                    returned_abs = brain_output.register_sensor_units(
+                        {unit_key: channel_count},
+                        z_neuron_resolution=10,
+                        group_index_start=next_group,
+                        frame_change_handling="absolute",
+                    )
+                    assigned.append(int(returned_abs[unit_key]))
+                    next_group += 1
+                    # Second strip holds joint velocity samples but must register as
+                    # Absolute frame mode: FEAGI agent verification expects cortical
+                    # areas that exist after auto-create; incremental sensory Servo
+                    # (`isvm` incremental) is not materialized (same constraint as the
+                    # per-registration Servo downgrade below).
+                    returned_vel_strip = brain_output.register_sensor_units(
+                        {unit_key: channel_count},
+                        z_neuron_resolution=10,
+                        group_index_start=next_group,
+                        frame_change_handling="absolute",
+                    )
+                    assigned.append(int(returned_vel_strip[unit_key]))
+                    next_group += 1
+                unit_groups[unit_key] = assigned
+                continue
+            if unit_key == "Proximity" and _proximity_jointvel_uses_motor_groups(
+                registrations
+            ):
+                others, grouped_by_mid = _partition_proximity_motor_parity(registrations)
+                assigned_mp: list[int] = []
+                for reg in sorted(others, key=lambda r: r.sensor_name):
+                    returned = brain_output.register_sensor_units(
+                        {unit_key: 1},
+                        z_neuron_resolution=10,
+                        group_index_start=next_group,
+                    )
+                    assigned_mp.append(int(returned[unit_key]))
+                    next_group += 1
+                for mid in sorted(grouped_by_mid.keys()):
+                    channel_count = len(grouped_by_mid[mid])
+                    returned = brain_output.register_sensor_units(
+                        {unit_key: channel_count},
+                        z_neuron_resolution=10,
+                        group_index_start=next_group,
+                    )
+                    assigned_mp.append(int(returned[unit_key]))
+                    next_group += 1
+                unit_groups[unit_key] = assigned_mp
+                logger.info(
+                    "[SENSORY][PROXIMITY-GROUP] Registered motor-parity Proximity: "
+                    "%d scalar strip(s), %d grouped limb strip(s), channels_per_limb=%s",
+                    len(others),
+                    len(grouped_by_mid),
+                    [
+                        len(grouped_by_mid[mid])
+                        for mid in sorted(grouped_by_mid.keys())
+                    ],
+                )
+                continue
+            assigned = []
+            for registration in registrations:
+                # FEAGI currently materializes Servo sensory areas as absolute isvm
+                # cortical IDs; requesting incremental frame IDs (aXN2bQEB...)
+                # leads to runtime writes targeting non-existent areas.
+                requested_frame_mode = registration.frame_change_handling
+                if (
+                    unit_key == "Servo"
+                    and requested_frame_mode == "incremental"
+                ):
+                    requested_frame_mode = "absolute"
+                    servo_incremental_downgraded += 1
+                returned = brain_output.register_sensor_units(
+                    {unit_key: 1},
+                    z_neuron_resolution=10,
+                    group_index_start=next_group,
+                    frame_change_handling=requested_frame_mode,
+                )
+                assigned.append(int(returned[unit_key]))
+                next_group += 1
+            unit_groups[unit_key] = assigned
+        else:
+            returned = brain_output.register_sensor_units(
+                {unit_key: len(registrations)},
+                z_neuron_resolution=10,
+                group_index_start=next_group,
+            )
+            unit_groups[unit_key] = [int(returned[unit_key])]
+            next_group += 1
+    if servo_incremental_downgraded > 0:
+        logger.warning(
+            "[SENSORY][SERVO-ENCODER] Downgraded %d incremental Servo sensory "
+            "channels to absolute frame in cache (grouped strips use absolute isvm).",
+            servo_incremental_downgraded,
+        )
+    return unit_groups
+
+
+def register_misc_reset_output_in_cache(
+    group_channels: dict[int, dict[str, list[str]]],
+    *,
+    reserved_group_ids: Optional[set[int]] = None,
+) -> tuple[int, MiscResetCommandTap]:
+    """
+    Register deterministic miscellaneous motor output (1x1x1) for reset command.
+
+    Uses the connector cache `motor_misc_data_register` binding. Registration makes
+    the Miscellaneous motor area part of the exported capability payload so FEAGI
+    auto-creates the corresponding cortical area on agent connect.
+
+    ``reserved_group_ids`` must include any cortical unit indices already claimed
+    by other motor registrations (e.g. SpatialPointer) so MiscData does not
+    collide on the same ``cortical_unit_index``.
+    """
+    cache = getattr(brain_output, "_cache", None)
+    if cache is None:
+        raise RuntimeError("ConnectorAgent cache is not initialized for misc reset output.")
+
+    import feagi_rust_py_libs as frpl
+
+    occupied_groups = set(group_channels.keys())
+    if reserved_group_ids:
+        occupied_groups.update(int(group_id) for group_id in reserved_group_ids)
+    misc_group_id = (max(occupied_groups) + 1) if occupied_groups else 0
+    misc_dimensions = frpl.connector_core.data_types.descriptors.MiscDataDimensions(
+        1,
+        1,
+        1,
     )
+    frame_mode = (
+        frpl.data_structures.genomic.cortical_area.FrameChangeHandling.Absolute()
+    )
+    cache.motor_misc_data_register(
+        misc_group_id,
+        1,
+        frame_mode,
+        misc_dimensions,
+    )
+
+    tap = MiscResetCommandTap()
+    motor_map = getattr(brain_output, "_motor_outputs_by_group_channel", None)
+    if not isinstance(motor_map, dict):
+        raise RuntimeError("brain_output motor channel map is unavailable.")
+    motor_map[(misc_group_id, 0)] = tap
+
+    logger.info(
+        "[MISC-RESET] Registered miscellaneous output group=%d channel=0 dims=1x1x1",
+        misc_group_id,
+    )
+    return misc_group_id, tap
+
+
+def _joint_name_from_sensor(sensor_name: str, prefix: str) -> str:
+    """Return the MuJoCo joint suffix from ``jointpos_<j>`` / ``jointvel_<j>`` names."""
+    if sensor_name.startswith(prefix):
+        return sensor_name[len(prefix):]
+    return ""
+
+
+def _servo_registrations_use_motor_groups(registrations: list[SensorRegistration]) -> bool:
+    """True when every Servo registration is tagged for grouped motor-parity layout."""
+    return bool(registrations) and all(
+        registration.motor_servo_group_id is not None for registration in registrations
+    )
+
+
+def _proximity_jointvel_uses_motor_groups(registrations: list[SensorRegistration]) -> bool:
+    """True when at least one Proximity joint-velocity row uses motor-parity grouping."""
+    return any(
+        registration.sensor_tag == "jointvel"
+        and registration.motor_servo_group_id is not None
+        for registration in registrations
+    )
+
+
+def _partition_proximity_motor_parity(
+    registrations: list[SensorRegistration],
+) -> tuple[list[SensorRegistration], dict[int, list[SensorRegistration]]]:
+    """
+    Split Proximity registrations into non-grouped scalars vs joint-velocity strips.
+
+    Joint-velocity rows carrying ``motor_servo_group_id`` share one cortical area per
+    motor group with ``motor_servo_channel_index`` selecting the joint channel.
+    """
+    others: list[SensorRegistration] = []
+    grouped: dict[int, list[SensorRegistration]] = {}
+    for registration in registrations:
+        if (
+            registration.sensor_tag == "jointvel"
+            and registration.motor_servo_group_id is not None
+        ):
+            grouped.setdefault(registration.motor_servo_group_id, []).append(registration)
+        else:
+            others.append(registration)
+    for motor_gid in grouped:
+        grouped[motor_gid].sort(key=lambda r: r.motor_servo_channel_index)
+    return others, grouped
+
+
+def _order_proximity_registrations_motor_parity(
+    registrations: list[SensorRegistration],
+) -> list[SensorRegistration]:
+    """Deterministic registration order matching cache registration and publish layout."""
+    if not _proximity_jointvel_uses_motor_groups(registrations):
+        return sorted(registrations, key=lambda r: r.sensor_name)
+    others, grouped_by_mid = _partition_proximity_motor_parity(registrations)
+    ordered_other = sorted(others, key=lambda r: r.sensor_name)
+    ordered_grouped: list[SensorRegistration] = []
+    for mid in sorted(grouped_by_mid.keys()):
+        ordered_grouped.extend(grouped_by_mid[mid])
+    return ordered_other + ordered_grouped
+
+
+def _append_legacy_per_joint_servo_registrations(
+    model,
+    sensor_registration_map: dict[str, list[SensorRegistration]],
+    name_translator: Optional[MujocoNameTranslator],
+) -> None:
+    """
+    Populate per-joint Servo encoder metadata (one cortical registration per joint per mode).
+
+    Called only when motor-parity mirroring never assigned ``sensor_registration_map["Servo"]``
+    (e.g. passive hinge/slide joints with no positional servo motor metadata). Models with
+    positional servos should rely exclusively on :func:`_align_servo_encoder_registrations_with_motors`.
+    """
+    legacy: list[SensorRegistration] = []
+    for joint_id in range(model.njnt):
+        joint_type = int(model.jnt_type[joint_id])
+        if joint_type not in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+            continue
+        joint_name = _sanitize_name(model.joint(joint_id).name or f"joint_{joint_id}")
+        display_joint_name = joint_name
+        if name_translator is not None:
+            display_joint_name = name_translator.translate_joint(joint_name)
+
+        joint_pos_name = f"jointpos_{joint_name}"
+        joint_pos_display_name = f"servo_encoder_position_{display_joint_name}"
+        if name_translator is not None:
+            joint_pos_display_name = name_translator.translate_sensor(
+                joint_pos_name
+            ) if joint_pos_name in name_translator.model_sensors else joint_pos_display_name
+        legacy.append(
+            SensorRegistration(
+                sensor_name=joint_pos_name,
+                display_name=joint_pos_display_name,
+                sensor_tag="jointpos",
+                bundle_id=joint_pos_name,
+                bundle_type="sensor_array",
+                source_entity=display_joint_name,
+                frame_change_handling="absolute",
+            )
+        )
+
+        joint_vel_name = f"jointvel_{joint_name}"
+        legacy.append(
+            SensorRegistration(
+                sensor_name=joint_vel_name,
+                display_name=f"servo_encoder_incremental_{display_joint_name}",
+                sensor_tag="jointvel",
+                bundle_id=joint_vel_name,
+                bundle_type="sensor_array",
+                source_entity=display_joint_name,
+                # Absolute: FEAGI device_registration / auto-create only provision
+                # absolute-frame sensory Servo IDs; see grouped mirror jointvel path.
+                frame_change_handling="absolute",
+            )
+        )
+
+    if legacy:
+        sensor_registration_map["Servo"] = legacy
+        logger.info(
+            "[SENSORY][SERVO-ENCODER] Legacy per-joint Servo metadata (%d registrations); "
+            "motor-parity mirroring did not assign Servo.",
+            len(legacy),
+        )
+
+
+def _align_servo_encoder_registrations_with_motors(
+    sensor_registration_map: dict[str, list[SensorRegistration]],
+    runtime_sensor_channels: list[RuntimeSensorChannel],
+    group_channel_metadata: dict[int, dict[str, list[dict[str, str]]]],
+) -> None:
+    """
+    Rebuild Servo encoder registrations from registered positional servo motors.
+
+    Encoder ``display_name`` values follow the same OPU-style labels as bounded
+    motor channels (``{bundle_id}-{channel_index}``, e.g. ``left_base_link-0``)
+    instead of translated joint nicknames from the name map.
+    """
+    runtime_by_name: dict[str, RuntimeSensorChannel] = {
+        channel.sensor_name: channel for channel in runtime_sensor_channels
+    }
+    mirrored: list[SensorRegistration] = []
+    missing_runtime_channels: list[str] = []
+
+    for group_id in sorted(group_channel_metadata.keys()):
+        positional_channels = group_channel_metadata[group_id].get("positional_servo", [])
+        for channel_index, channel_meta in enumerate(positional_channels):
+            joint_name = str(channel_meta.get("joint_name", "")).strip()
+            if not joint_name:
+                continue
+            joint_name = _sanitize_name(joint_name)
+            bundle_id = str(channel_meta.get("bundle_id", "")).strip()
+            if bundle_id:
+                encoder_label = f"{bundle_id}-{channel_index}"
+            else:
+                encoder_label = (
+                    str(channel_meta.get("channel_name", joint_name)).strip() or joint_name
+                )
+            source_entity = str(channel_meta.get("source_entity", joint_name)).strip() or joint_name
+            joint_pos_sensor_name = f"jointpos_{joint_name}"
+            joint_vel_sensor_name = f"jointvel_{joint_name}"
+            if joint_pos_sensor_name not in runtime_by_name:
+                missing_runtime_channels.append(joint_pos_sensor_name)
+                continue
+            if joint_vel_sensor_name not in runtime_by_name:
+                missing_runtime_channels.append(joint_vel_sensor_name)
+                continue
+            mirrored.append(
+                SensorRegistration(
+                    sensor_name=joint_pos_sensor_name,
+                    display_name=f"servo_encoder_position_{encoder_label}",
+                    sensor_tag="jointpos",
+                    bundle_id=joint_pos_sensor_name,
+                    bundle_type="sensor_array",
+                    source_entity=source_entity,
+                    frame_change_handling="absolute",
+                    motor_servo_group_id=group_id,
+                    motor_servo_channel_index=channel_index,
+                )
+            )
+            mirrored.append(
+                SensorRegistration(
+                    sensor_name=joint_vel_sensor_name,
+                    display_name=f"servo_encoder_incremental_{encoder_label}",
+                    sensor_tag="jointvel",
+                    bundle_id=joint_vel_sensor_name,
+                    bundle_type="sensor_array",
+                    source_entity=source_entity,
+                    # Joint velocity is still read from qvel; use absolute in
+                    # device_registration so FEAGI does not register unused incremental
+                    # sensory Servo cortical peers (aXN2bQEB…).
+                    frame_change_handling="absolute",
+                    motor_servo_group_id=group_id,
+                    motor_servo_channel_index=channel_index,
+                )
+            )
+
+    if missing_runtime_channels:
+        logger.warning(
+            "[SENSORY][SERVO-ENCODER] Missing runtime channels for mirrored servo encoders: %s",
+            sorted(set(missing_runtime_channels)),
+        )
+
+    has_positional_motors = any(
+        bool(group_channel_metadata.get(gid, {}).get("positional_servo"))
+        for gid in group_channel_metadata
+    )
+    if mirrored:
+        sensor_registration_map["Servo"] = mirrored
+        logger.info(
+            "[SENSORY][SERVO-ENCODER] Mirrored Servo registrations from positional outputs: %d",
+            len(mirrored),
+        )
+    elif has_positional_motors:
+        sensor_registration_map["Servo"] = []
+        logger.warning(
+            "[SENSORY][SERVO-ENCODER] Positional servo motors are present but no Servo "
+            "encoder mirror was built (missing sensors or metadata); cleared per-joint "
+            "Servo list so only motor-parity combo strips are used once mirroring succeeds."
+        )
+    else:
+        logger.warning(
+            "[SENSORY][SERVO-ENCODER] No positional servo channels available to mirror into Servo encoders."
+        )
+
+
+def _collapse_proximity_to_mirrored_servo_subset(
+    sensor_registration_map: dict[str, list[SensorRegistration]],
+    runtime_sensor_channels: list[RuntimeSensorChannel],
+) -> None:
+    """
+    Keep Proximity joint-velocity channels aligned with mirrored Servo encoders.
+
+    Matching uses joint names parsed from ``jointpos_*`` / ``jointvel_*`` so it
+    stays consistent whether ``source_entity`` is raw or translated. Joint keys
+    are normalized with :func:`_sanitize_name` so motor metadata matches MuJoCo
+    discovery-time sensor names.
+    """
+    servo_registrations = sensor_registration_map.get("Servo", [])
+    if not servo_registrations:
+        return
+    mirrored_joint_names: set[str] = set()
+    for registration in servo_registrations:
+        if registration.sensor_tag != "jointpos":
+            continue
+        raw_joint = _joint_name_from_sensor(registration.sensor_name, "jointpos_")
+        if raw_joint:
+            mirrored_joint_names.add(_sanitize_name(raw_joint))
+    if not mirrored_joint_names:
+        return
+    original_proximity = sensor_registration_map.get("Proximity", [])
+    if not original_proximity:
+        return
+
+    def _proximity_joint_key(reg: SensorRegistration) -> str:
+        raw = _joint_name_from_sensor(reg.sensor_name, "jointvel_")
+        return _sanitize_name(raw) if raw else ""
+
+    filtered_proximity = [
+        registration
+        for registration in original_proximity
+        if _proximity_joint_key(registration) in mirrored_joint_names
+    ]
+    if not filtered_proximity:
+        logger.warning(
+            "[SENSORY][PROXIMITY] Mirrored servo alignment removed all Proximity channels; keeping original set."
+        )
+        return
+    servo_joint_to_motor: dict[str, tuple[int, int]] = {}
+    for registration in sensor_registration_map.get("Servo", []):
+        if registration.sensor_tag != "jointpos":
+            continue
+        raw_joint = _joint_name_from_sensor(registration.sensor_name, "jointpos_")
+        if (
+            raw_joint
+            and registration.motor_servo_group_id is not None
+        ):
+            servo_joint_to_motor[_sanitize_name(raw_joint)] = (
+                registration.motor_servo_group_id,
+                registration.motor_servo_channel_index,
+            )
+
+    enriched: list[SensorRegistration] = []
+    tagged_jointvel = 0
+    for registration in filtered_proximity:
+        if registration.sensor_tag != "jointvel":
+            enriched.append(registration)
+            continue
+        joint_key = _proximity_joint_key(registration)
+        motor_meta = servo_joint_to_motor.get(joint_key)
+        if motor_meta is None:
+            enriched.append(registration)
+            continue
+        group_id, channel_index = motor_meta
+        tagged_jointvel += 1
+        enriched.append(
+            replace(
+                registration,
+                motor_servo_group_id=group_id,
+                motor_servo_channel_index=channel_index,
+            )
+        )
+    sensor_registration_map["Proximity"] = _order_proximity_registrations_motor_parity(
+        enriched
+    )
+
+    filtered_runtime_channels: list[RuntimeSensorChannel] = []
+    for channel in runtime_sensor_channels:
+        if channel.sensor_tag != "jointvel":
+            filtered_runtime_channels.append(channel)
+            continue
+        raw_vel = _joint_name_from_sensor(channel.sensor_name, "jointvel_")
+        if raw_vel and _sanitize_name(raw_vel) in mirrored_joint_names:
+            filtered_runtime_channels.append(channel)
+    runtime_sensor_channels[:] = filtered_runtime_channels
+    logger.info(
+        "[SENSORY][PROXIMITY] Aligned Proximity channels with mirrored servo joints: %d "
+        "(motor-parity tags on jointvel=%d)",
+        len(sensor_registration_map["Proximity"]),
+        tagged_jointvel,
+    )
+
+
+def _rebuild_sensory_scalar_cache_views_after_servo_mirror(
+    sensor_registration_map: dict[str, list[SensorRegistration]],
+    sensory_registration_metadata: dict[str, list[SensorRegistration]],
+    runtime_sensor_channels: list[RuntimeSensorChannel],
+    supported_scalar_sensor_units: set[str],
+) -> tuple[set[str], dict[str, RuntimeSensorChannel]]:
+    """
+    Recompute scalar-supported sensor names and runtime lookup after Servo mirror.
+
+    Updates ``sensory_registration_metadata`` for Servo and Proximity so the
+    device enricher stays aligned with ``sensor_registration_map``.
+    """
+    for key in ("Servo", "Proximity"):
+        if key in sensor_registration_map:
+            regs = list(sensor_registration_map[key])
+            if key == "Servo" and _servo_registrations_use_motor_groups(regs):
+                regs.sort(
+                    key=lambda r: (
+                        r.motor_servo_group_id or 0,
+                        0 if r.sensor_tag == "jointpos" else 1,
+                        r.motor_servo_channel_index,
+                        r.sensor_name,
+                    )
+                )
+                sensor_registration_map[key] = regs
+            elif key == "Proximity" and _proximity_jointvel_uses_motor_groups(regs):
+                regs = _order_proximity_registrations_motor_parity(regs)
+                sensor_registration_map[key] = regs
+            sensory_registration_metadata[key] = regs
+    scalar_names = {
+        registration.sensor_name
+        for unit_key, registrations in sensor_registration_map.items()
+        if unit_key in supported_scalar_sensor_units
+        for registration in registrations
+    }
+    filtered = [
+        channel
+        for channel in runtime_sensor_channels
+        if channel.sensor_name in scalar_names
+    ]
+    runtime_sensor_channels[:] = filtered
+    return scalar_names, {channel.sensor_name: channel for channel in filtered}
 
 
 def _log_discovered_capability_summary(
@@ -1840,6 +3044,114 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _read_imu_axis_triple(
+    data,
+    axis: IMUAxisRuntime,
+) -> Optional[tuple[float, float, float]]:
+    """
+    Read three consecutive sensordata samples for an IMU axis (XYZ).
+
+    Returns ``None`` if the underlying buffer doesn't have enough samples
+    (e.g. truncated runtime data). Non-finite samples (``NaN``/``inf``) are
+    coerced to ``0.0`` so the downstream normalization never propagates them
+    into the FEAGI cache.
+    """
+    sensordata = data.sensordata
+    if axis.start_index + 2 >= len(sensordata):
+        return None
+    values: list[float] = []
+    for offset in range(3):
+        sample = float(sensordata[axis.start_index + offset])
+        if not np.isfinite(sample):
+            sample = 0.0
+        values.append(sample)
+    return values[0], values[1], values[2]
+
+
+def _normalize_imu_axis_triple(
+    triple: tuple[float, float, float],
+    axis: IMUAxisRuntime,
+) -> Optional[tuple[float, float, float]]:
+    """
+    Normalize an IMU axis triple into ``[-1, 1]``.
+
+    Precedence:
+      * ``axis.cutoff > 0``: deterministic normalization against the declared
+        saturation magnitude (mapping JSON override or MuJoCo XML cutoff).
+      * ``axis.autoscale is not None``: adaptive EMM autoscale (fallback for
+        models that declare neither reference). Emits a single WARN per
+        sensor on first use.
+      * Otherwise (both absent, which should not happen under the current
+        builder): return ``None`` to leave the cached sub-axis untouched.
+    """
+    if axis.cutoff > 0.0:
+        cutoff = axis.cutoff
+        return (
+            _clamp(triple[0] / cutoff, -1.0, 1.0),
+            _clamp(triple[1] / cutoff, -1.0, 1.0),
+            _clamp(triple[2] / cutoff, -1.0, 1.0),
+        )
+    state = axis.autoscale
+    if state is None:
+        return None
+    if not state.warned:
+        logger.warning(
+            "[RAW-IMU][AUTOSCALE] sensor=%s modality=%s - no cutoff declared "
+            "in mapping JSON or MuJoCo XML; using adaptive EMM normalization "
+            "(floor=%.4f decay=%.4f safety=%.2f). Declare sensor_cutoffs in "
+            "mujoco_feagi_mappings.json or <sensor cutoff=...> in the model "
+            "XML for deterministic normalization.",
+            axis.sensor_name,
+            state.modality,
+            state.floor,
+            _IMU_AUTOSCALE_DECAY,
+            _IMU_AUTOSCALE_SAFETY_FACTOR,
+        )
+        state.warned = True
+    abs_max_now = max(abs(triple[0]), abs(triple[1]), abs(triple[2]))
+    divisor = state.update_divisor(abs_max_now)
+    return (
+        _clamp(triple[0] / divisor, -1.0, 1.0),
+        _clamp(triple[1] / divisor, -1.0, 1.0),
+        _clamp(triple[2] / divisor, -1.0, 1.0),
+    )
+
+
+def _read_imu_quaternion(
+    data,
+    smart_imu: SmartIMURuntimeChannel,
+) -> Optional[tuple[float, float, float, float]]:
+    """
+    Read a unit quaternion ``(w, x, y, z)`` from MuJoCo sensordata.
+
+    MuJoCo's `framequat`/`ballquat` sensors emit unit-norm quaternions in
+    that order, so each component already lives in ``[-1, 1]``. The function
+    re-normalizes defensively against accumulated floating-point error and
+    returns ``None`` if the buffer is too short or the quaternion has zero
+    magnitude (degenerate state).
+    """
+    sensordata = data.sensordata
+    if smart_imu.start_index + 3 >= len(sensordata):
+        return None
+    components: list[float] = []
+    for offset in range(4):
+        sample = float(sensordata[smart_imu.start_index + offset])
+        if not np.isfinite(sample):
+            return None
+        components.append(sample)
+    norm = float(np.sqrt(sum(value * value for value in components)))
+    if norm <= 0.0:
+        return None
+    inv_norm = 1.0 / norm
+    w, x, y, z = (component * inv_norm for component in components)
+    return (
+        _clamp(w, -1.0, 1.0),
+        _clamp(x, -1.0, 1.0),
+        _clamp(y, -1.0, 1.0),
+        _clamp(z, -1.0, 1.0),
+    )
+
+
 def _build_joint_limit_guards(model) -> list[JointLimitGuard]:
     """
     Build 1-DOF joint limit guards from MuJoCo model metadata.
@@ -1956,6 +3268,48 @@ def _build_expected_motor_cortical_ids(motors: list[tuple]) -> list[str]:
                 ).decode()
             )
     return sorted(expected)
+
+
+def _reset_mujoco_model_state(model, data) -> None:
+    """Reset MuJoCo state to initial pose (keyframe 4 when available)."""
+    if model.nkey > 4:
+        mujoco.mj_resetDataKeyframe(model, data, 4)
+    else:
+        mujoco.mj_resetData(model, data)
+
+
+def _clear_motor_runtime_state_after_reset(
+    motors: list[tuple],
+    data,
+    motor_telemetry_state: dict[tuple[int, int], dict[str, float]],
+    last_motor_snapshot: dict[str, float],
+) -> None:
+    """Clear per-motor controller runtime state after simulation reset."""
+    for (
+        motor,
+        _actuator_name,
+        actuator_idx,
+        min_val,
+        max_val,
+        _group_id,
+        _channel_index,
+        _device_type,
+        _encoding,
+    ) in motors:
+        neutral_ctrl = 0.0
+        if isinstance(motor, ServoMotor):
+            neutral_ctrl = (min_val + max_val) / 2.0
+            if hasattr(motor, "_current_angle"):
+                setattr(motor, "_current_angle", neutral_ctrl)
+        elif isinstance(motor, RotaryMotor):
+            neutral_ctrl = 0.0
+            if hasattr(motor, "_current_speed"):
+                setattr(motor, "_current_speed", 0.0)
+        data.ctrl[actuator_idx] = neutral_ctrl
+        if hasattr(motor, "_last_rx_mode"):
+            setattr(motor, "_last_rx_mode", None)
+    motor_telemetry_state.clear()
+    last_motor_snapshot.clear()
 
 
 def _health_check_url(feagi_host: str, feagi_api_port: int) -> str:
@@ -2240,6 +3594,346 @@ def _build_vision_units_from_model(
     return vision_units, selected_camera_groups
 
 
+_MM_PER_M: Final[float] = 1000.0
+
+
+@dataclass(frozen=True)
+class MujocoSpatialPointerRuntime:
+    """Resolved MuJoCo kinematics for a configured SpatialPointer workspace."""
+
+    config: SpatialPointerConfig
+    ee_site_id: int
+    arm_actuator_indices: Tuple[int, ...]
+    arm_dof_indices: Tuple[int, ...]
+    arm_qpos_indices: Tuple[int, ...]
+
+
+def _spatial_pointer_cortical_ids_from_cache() -> list[str]:
+    """Return base64 cortical IDs for SpatialPointer entries in the motor cache."""
+    cache = getattr(brain_output, "_cache", None)
+    if cache is None or not hasattr(cache, "get_motor_cortical_ids_for_verification"):
+        return []
+    pointer_ids: list[str] = []
+    for cortical_id in cache.get_motor_cortical_ids_for_verification():
+        try:
+            raw = base64.b64decode(cortical_id, validate=True)
+        except (ValueError, binascii.Error):
+            continue
+        if len(raw) == 8 and raw[1:4] == b"ptr":
+            pointer_ids.append(cortical_id)
+    return sorted(pointer_ids)
+
+
+def _export_device_registrations_payload_for_feagi() -> str:
+    """Build the device_registrations JSON payload sent to FEAGI after connect."""
+    cache = getattr(brain_output, "_cache", None)
+    if cache is None:
+        raise RuntimeError("ConnectorAgent cache is not initialized.")
+    device_regs = json.loads(cache.export_capabilities_json())
+    enricher = getattr(brain_output, "_device_registration_enricher", None)
+    if enricher is not None:
+        device_regs = enricher(device_regs)
+    device_regs = brain_output._normalize_device_registration_properties(device_regs)
+    device_regs = brain_output._apply_device_registration_contract_defaults(device_regs)
+    device_regs = brain_output._validate_device_registration_contract(device_regs)
+    return json.dumps(device_regs, sort_keys=True)
+
+
+def _register_spatial_pointer_post_connect(
+    pointer_cfg: SpatialPointerConfig,
+    name_translator: MujocoNameTranslator,
+    model: mujoco.MjModel,
+) -> MujocoSpatialPointerRuntime:
+    """
+    Register SpatialPointer after core FEAGI connect.
+
+    Servo OPUs must connect first. If FEAGI cannot auto-create the pointer
+    cortical area, this raises and the caller keeps servo control active.
+    """
+    brain_output.register_motor_spatial_pointer(
+        group=pointer_cfg.group,
+        width=pointer_cfg.width,
+        height=pointer_cfg.height,
+        depth=pointer_cfg.depth,
+        encoding=pointer_cfg.mode,
+        number_channels=1,
+        window_ms=pointer_cfg.window_ms,
+        max_axis_velocity=pointer_cfg.max_axis_velocity,
+    )
+    runtime = _resolve_mujoco_spatial_pointer_runtime(model, name_translator)
+    client = getattr(brain_output, "_client", None)
+    if client is None:
+        raise RuntimeError("FEAGI client is not available after connect.")
+    pointer_ids = _spatial_pointer_cortical_ids_from_cache()
+    if not pointer_ids:
+        raise RuntimeError(
+            "SpatialPointer cortical ID derivation returned no IDs from cache."
+        )
+    client.send_device_configuration(
+        _export_device_registrations_payload_for_feagi(),
+        expected_cortical_ids=pointer_ids,
+    )
+    logger.info(
+        "[REGISTER] SpatialPointer post-connect group=%d mode=%s ee_site=%s "
+        "dims=%dx%dx%d channels=[%d,%d,%d] arm_actuators=%s",
+        pointer_cfg.group,
+        pointer_cfg.mode,
+        name_translator.spatial_pointer_ee_site,
+        pointer_cfg.width,
+        pointer_cfg.height,
+        pointer_cfg.depth,
+        pointer_cfg.x_channel,
+        pointer_cfg.y_channel,
+        pointer_cfg.z_channel,
+        list(runtime.arm_actuator_indices),
+    )
+    return runtime
+
+
+def _read_brain_output_pointer_axis(
+    group: int,
+    channel: int,
+    mode: str,
+) -> Optional[float]:
+    """Read one decoded SpatialPointer axis from ``brain_output._motor_data``."""
+    motor_data = getattr(brain_output, "_motor_data", {})
+    if not isinstance(motor_data, dict):
+        return None
+    value = motor_data.get(f"{group}:{channel}:{mode}")
+    if not isinstance(value, (int, float)):
+        return None
+    if mode == "incremental":
+        return max(-1.0, min(1.0, float(value)))
+    return max(0.0, min(1.0, float(value)))
+
+
+def _workspace_mm_to_m(
+    workspace_mm: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    return (
+        workspace_mm[0] / _MM_PER_M,
+        workspace_mm[1] / _MM_PER_M,
+        workspace_mm[2] / _MM_PER_M,
+    )
+
+
+def _mujoco_joint_dof_count(model: mujoco.MjModel, joint_id: int) -> int:
+    """
+    Return the number of velocity DoFs for one joint.
+
+    MuJoCo 3.6+ removed ``jnt_dofnum``; derive width from consecutive
+    ``jnt_dofadr`` entries (or ``nv`` for the last joint).
+    """
+    if hasattr(model, "jnt_dofnum"):
+        return int(model.jnt_dofnum[joint_id])
+    joint_index = int(joint_id)
+    if joint_index < 0 or joint_index >= int(model.njnt):
+        return 0
+    dof_start = int(model.jnt_dofadr[joint_index])
+    if joint_index + 1 < int(model.njnt):
+        dof_end = int(model.jnt_dofadr[joint_index + 1])
+    else:
+        dof_end = int(model.nv)
+    return max(0, dof_end - dof_start)
+
+
+def _resolve_mujoco_spatial_pointer_runtime(
+    model: mujoco.MjModel,
+    name_translator: MujocoNameTranslator,
+) -> Optional[MujocoSpatialPointerRuntime]:
+    """Bind SpatialPointer config to MuJoCo site and arm joint actuators."""
+    cfg = name_translator.spatial_pointer
+    if cfg is None:
+        return None
+    site_name = name_translator.spatial_pointer_ee_site
+    site_id = int(
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+    )
+    if site_id < 0:
+        raise RuntimeError(
+            f"spatial_pointer_ee_site '{site_name}' was not found in the MuJoCo model."
+        )
+    arm_dof_target = int(name_translator.spatial_pointer_arm_dof_count)
+    actuator_indices: list[int] = []
+    dof_indices: list[int] = []
+    qpos_indices: list[int] = []
+    seen_dofs: set[int] = set()
+    for act_id in range(int(model.nu)):
+        if len(actuator_indices) >= arm_dof_target:
+            break
+        if int(model.actuator_trntype[act_id]) != int(mujoco.mjtTrn.mjTRN_JOINT):
+            continue
+        joint_id = int(model.actuator_trnid[act_id, 0])
+        if joint_id < 0:
+            continue
+        dof_adr = int(model.jnt_dofadr[joint_id])
+        dof_num = _mujoco_joint_dof_count(model, joint_id)
+        if dof_num != 1:
+            continue
+        dof_i = dof_adr
+        if dof_i in seen_dofs:
+            continue
+        seen_dofs.add(dof_i)
+        qpos_indices.append(int(model.jnt_qposadr[joint_id]))
+        dof_indices.append(dof_i)
+        actuator_indices.append(act_id)
+    if len(actuator_indices) < arm_dof_target:
+        raise RuntimeError(
+            "spatial_pointer requires "
+            f"{arm_dof_target} single-DoF joint actuators; "
+            f"found {len(actuator_indices)}."
+        )
+    return MujocoSpatialPointerRuntime(
+        config=cfg,
+        ee_site_id=site_id,
+        arm_actuator_indices=tuple(actuator_indices[:arm_dof_target]),
+        arm_dof_indices=tuple(dof_indices[:arm_dof_target]),
+        arm_qpos_indices=tuple(qpos_indices[:arm_dof_target]),
+    )
+
+
+def _ik_site_to_position(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    runtime: MujocoSpatialPointerRuntime,
+    target_xyz_m: Tuple[float, float, float],
+    *,
+    max_iterations: int = 40,
+    damping: float = 1e-2,
+    step_scale: float = 0.35,
+    position_tolerance_m: float = 1e-3,
+) -> bool:
+    """Iterative damped least-squares IK for the configured end-effector site."""
+    target = np.asarray(target_xyz_m, dtype=np.float64)
+    dof_indices = list(runtime.arm_dof_indices)
+    qpos_indices = list(runtime.arm_qpos_indices)
+    site_id = runtime.ee_site_id
+    for _ in range(max_iterations):
+        mujoco.mj_forward(model, data)
+        error = target - np.asarray(data.site_xpos[site_id], dtype=np.float64)
+        if float(np.linalg.norm(error)) <= position_tolerance_m:
+            return True
+        jacp = np.zeros((3, model.nv), dtype=np.float64)
+        jacr = np.zeros((3, model.nv), dtype=np.float64)
+        mujoco.mj_jacSite(model, data, jacp, jacr, site_id)
+        jacobian = jacp[:, dof_indices]
+        jjt = jacobian @ jacobian.T + (damping**2) * np.eye(3, dtype=np.float64)
+        delta = jacobian.T @ np.linalg.solve(jjt, error)
+        for qpos_adr, delta_i in zip(qpos_indices, delta):
+            data.qpos[qpos_adr] = float(data.qpos[qpos_adr]) + step_scale * float(delta_i)
+        mujoco.mj_forward(model, data)
+    return False
+
+
+def _sync_arm_actuator_ctrl_from_qpos(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    runtime: MujocoSpatialPointerRuntime,
+) -> None:
+    """Write arm actuator controls from the current joint positions."""
+    for act_id, qpos_adr in zip(
+        runtime.arm_actuator_indices,
+        runtime.arm_qpos_indices,
+    ):
+        angle = float(data.qpos[qpos_adr])
+        lo = float(model.actuator_ctrlrange[act_id, 0])
+        hi = float(model.actuator_ctrlrange[act_id, 1])
+        data.ctrl[act_id] = max(lo, min(hi, angle))
+
+
+def _apply_mujoco_spatial_pointer_target(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    runtime: MujocoSpatialPointerRuntime,
+    last_target_m: Optional[Tuple[float, float, float]],
+    control_dt_s: float,
+) -> Optional[Tuple[float, float, float]]:
+    """
+    Apply FEAGI SpatialPointer motor output to the MuJoCo arm via Cartesian IK.
+
+    Runs after per-servo motor application so pointer motion wins on arm joints.
+    """
+    cfg = runtime.config
+    px = _read_brain_output_pointer_axis(cfg.group, cfg.x_channel, cfg.mode)
+    py = _read_brain_output_pointer_axis(cfg.group, cfg.y_channel, cfg.mode)
+    pz = _read_brain_output_pointer_axis(cfg.group, cfg.z_channel, cfg.mode)
+    if px is None or py is None or pz is None:
+        return last_target_m
+
+    workspace_min_m = _workspace_mm_to_m(cfg.workspace_min_mm)
+    workspace_max_m = _workspace_mm_to_m(cfg.workspace_max_mm)
+    span_m = (
+        workspace_max_m[0] - workspace_min_m[0],
+        workspace_max_m[1] - workspace_min_m[1],
+        workspace_max_m[2] - workspace_min_m[2],
+    )
+
+    if cfg.mode == "incremental":
+        vx = 0.0 if abs(px) < cfg.deadband else px
+        vy = 0.0 if abs(py) < cfg.deadband else py
+        vz = 0.0 if abs(pz) < cfg.deadband else pz
+        if vx == 0.0 and vy == 0.0 and vz == 0.0:
+            return last_target_m
+        gain = float(cfg.vel_gain)
+        dt = float(control_dt_s)
+        mujoco.mj_forward(model, data)
+        if last_target_m is None:
+            seed = tuple(
+                float(data.site_xpos[runtime.ee_site_id][axis]) for axis in range(3)
+            )
+        else:
+            seed = last_target_m
+        target = [
+            seed[0] + vx * span_m[0] * gain * dt,
+            seed[1] + vy * span_m[1] * gain * dt,
+            seed[2] + vz * span_m[2] * gain * dt,
+        ]
+        for axis in range(3):
+            lo = workspace_min_m[axis]
+            hi = workspace_max_m[axis]
+            target[axis] = max(lo, min(hi, target[axis]))
+        target_xyz_m = (target[0], target[1], target[2])
+    else:
+        target_xyz_m = (
+            workspace_min_m[0] + px * span_m[0],
+            workspace_min_m[1] + py * span_m[1],
+            workspace_min_m[2] + pz * span_m[2],
+        )
+        if last_target_m is not None:
+            norm_dx = (
+                abs(target_xyz_m[0] - last_target_m[0]) / span_m[0]
+                if span_m[0] > 0.0
+                else 0.0
+            )
+            norm_dy = (
+                abs(target_xyz_m[1] - last_target_m[1]) / span_m[1]
+                if span_m[1] > 0.0
+                else 0.0
+            )
+            norm_dz = (
+                abs(target_xyz_m[2] - last_target_m[2]) / span_m[2]
+                if span_m[2] > 0.0
+                else 0.0
+            )
+            if max(norm_dx, norm_dy, norm_dz) < cfg.deadband:
+                return last_target_m
+
+    if not _ik_site_to_position(model, data, runtime, target_xyz_m):
+        logger.debug(
+            "[SPATIAL_POINTER] IK did not converge for target_m=%s",
+            target_xyz_m,
+        )
+    _sync_arm_actuator_ctrl_from_qpos(model, data, runtime)
+    logger.debug(
+        "[SPATIAL_POINTER] Applied mode=%s target_m=(%.4f, %.4f, %.4f)",
+        cfg.mode,
+        target_xyz_m[0],
+        target_xyz_m[1],
+        target_xyz_m[2],
+    )
+    return target_xyz_m
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generic MuJoCo Controller for FEAGI")
     # Network config must be explicit (no defaults).
@@ -2332,6 +4026,93 @@ def main():
             "Disabled by default."
         ),
     )
+    parser.add_argument(
+        "--loop-rate-hz",
+        type=float,
+        default=None,
+        help=(
+            "Controller main-loop rate in Hz. When omitted, the loop uses "
+            "the MuJoCo model timestep rate (1 / model.opt.timestep). Must be > 0."
+        ),
+    )
+    parser.add_argument(
+        "--vision-rate-hz",
+        type=float,
+        default=60.0,
+        help=(
+            "Maximum FEAGI vision publish rate in Hz. Motor/IMU processing "
+            "continues at the main-loop rate. Must be > 0."
+        ),
+    )
+    # FEAGI lifecycle recovery (genome reload / FEAGI restart / network drop).
+    # All four are required: the recovery decision logic lives in the
+    # feagi-agent Rust crate and ships a single, defaults-free policy
+    # configuration so behavior is identical across SDKs.
+    parser.add_argument(
+        "--feagi-health-poll-interval-s",
+        type=float,
+        default=None,
+        help=(
+            "Override the controller's health poll interval (seconds). When "
+            "omitted, the value comes from [recovery].health_poll_interval_s "
+            "in the FEAGI config file. Must be > 0."
+        ),
+    )
+    parser.add_argument(
+        "--feagi-health-fetch-timeout-ms",
+        type=int,
+        default=None,
+        help=(
+            "Override the HTTP timeout (ms) for each health snapshot fetch. "
+            "When omitted, the value comes from "
+            "[recovery].health_fetch_timeout_ms in the FEAGI config file. "
+            "Must be > 0 and < health_poll_interval_s * 1000."
+        ),
+    )
+    parser.add_argument(
+        "--feagi-reconnect-cooldown-ms",
+        type=int,
+        default=None,
+        help=(
+            "Override the minimum interval (ms) between reconnect attempts. "
+            "When omitted, the value comes from "
+            "[recovery].reconnect_cooldown_ms in the FEAGI config file. "
+            "Must be > 0."
+        ),
+    )
+    parser.add_argument(
+        "--feagi-reconnect-max-failures",
+        type=int,
+        default=None,
+        help=(
+            "Override the maximum number of consecutive failed reconnect "
+            "attempts before the controller exits. When omitted, the value "
+            "comes from [recovery].reconnect_max_failures in the FEAGI "
+            "config file. Must be > 0."
+        ),
+    )
+    parser.add_argument(
+        "--mcp-introspection-port",
+        type=int,
+        default=None,
+        help=(
+            "Optional: bind a small HTTP server on this port that exposes raw "
+            "MuJoCo physics state (joints/actuators/sensors) and accepts joint "
+            "qpos/qvel writes. Used by the FEAGI MCP for ground-truth state "
+            "inspection. Falls back to the MUJOCO_MCP_INTROSPECTION_PORT env "
+            "var when omitted; if neither is set, the introspection server "
+            "is not started."
+        ),
+    )
+    parser.add_argument(
+        "--mcp-introspection-host",
+        type=str,
+        default=None,
+        help=(
+            "Optional: bind address for the MCP introspection HTTP server. "
+            "Falls back to MUJOCO_MCP_INTROSPECTION_HOST or 127.0.0.1."
+        ),
+    )
     args = parser.parse_args()
 
     logger.info("[START] Generic MuJoCo Controller (FEAGI Python SDK)")
@@ -2399,6 +4180,41 @@ def main():
         "[SAFETY] Joint-limit guards active for %d joints",
         len(joint_limit_guards),
     )
+
+    introspection_server: Optional[MujocoIntrospectionServer] = None
+    introspection_step_lock = threading.Lock()
+    resolved_introspection_port = args.mcp_introspection_port
+    if resolved_introspection_port is None:
+        env_port = os.environ.get("MUJOCO_MCP_INTROSPECTION_PORT")
+        if env_port and env_port.strip():
+            try:
+                resolved_introspection_port = int(env_port)
+            except ValueError:
+                logger.warning(
+                    "[MCP-INTROSPECTION] Ignoring invalid "
+                    "MUJOCO_MCP_INTROSPECTION_PORT=%r",
+                    env_port,
+                )
+                resolved_introspection_port = None
+    resolved_introspection_host = args.mcp_introspection_host or os.environ.get(
+        "MUJOCO_MCP_INTROSPECTION_HOST"
+    ) or "127.0.0.1"
+    if resolved_introspection_port:
+        try:
+            introspection_server = MujocoIntrospectionServer(
+                model=model,
+                data=data,
+                step_lock=introspection_step_lock,
+                port=resolved_introspection_port,
+                host=resolved_introspection_host,
+            )
+            introspection_server.start()
+        except Exception as introspection_exc:
+            logger.warning(
+                "[MCP-INTROSPECTION] Disabled (start failed): %s",
+                introspection_exc,
+            )
+            introspection_server = None
     vision_units, selected_vision_cameras = _build_vision_units_from_model(
         model,
         name_translator,
@@ -2426,15 +4242,22 @@ def main():
     )
 
     # Register motors with FEAGI (uses brain_output cache; agent_id must already be set)
-    sensor_registration_map, runtime_sensor_channels = _build_sensor_registration_map(
+    (
+        sensor_registration_map,
+        runtime_sensor_channels,
+        raw_imu_runtime_by_site,
+        smart_imu_runtime_by_sensor,
+    ) = _build_sensor_registration_map(
         model,
         model_load_path,
         name_translator=name_translator,
     )
     supported_scalar_sensor_units = {"Proximity", "Servo", "Shock", "MiscData"}
+    supported_imu_sensor_units = {"RawIMU", "SmartIMU"}
+    supported_sensor_units = supported_scalar_sensor_units | supported_imu_sensor_units
     unsupported_registration_details: dict[str, list[str]] = {}
     for unit_key, registrations in sensor_registration_map.items():
-        if unit_key in supported_scalar_sensor_units:
+        if unit_key in supported_sensor_units:
             continue
         unsupported_registration_details[unit_key] = sorted(
             registration.sensor_name for registration in registrations
@@ -2444,7 +4267,7 @@ def main():
         logger.warning(
             "[SENSORY][UNSUPPORTED] Excluding unsupported FEAGI sensory units "
             "from cache registration. Supported units=%s Unsupported units=%s",
-            sorted(supported_scalar_sensor_units),
+            sorted(supported_sensor_units),
             unsupported_registered_units,
         )
         for unit_key in unsupported_registered_units:
@@ -2458,12 +4281,31 @@ def main():
     sensor_registration_map = {
         unit_key: registrations
         for unit_key, registrations in sensor_registration_map.items()
-        if unit_key in supported_scalar_sensor_units
+        if unit_key in supported_sensor_units
     }
     sensory_registration_metadata = {
         unit_key: list(registrations)
         for unit_key, registrations in sensor_registration_map.items()
     }
+    servo_registrations = sensor_registration_map.get("Servo", [])
+    servo_absolute_count = sum(
+        1
+        for registration in servo_registrations
+        if registration.frame_change_handling == "absolute"
+    )
+    servo_incremental_count = sum(
+        1
+        for registration in servo_registrations
+        if registration.frame_change_handling == "incremental"
+    )
+    if servo_registrations:
+        logger.info(
+            "[SENSORY][SERVO-ENCODER] Registered Servo encoder areas "
+            "absolute=%d incremental=%d total=%d",
+            servo_absolute_count,
+            servo_incremental_count,
+            len(servo_registrations),
+        )
     if selected_vision_cameras:
         sensory_registration_metadata["Vision"] = [
             SensorRegistration(
@@ -2476,15 +4318,28 @@ def main():
             )
             for camera_name, _camera_index, _group_index in selected_vision_cameras
         ]
-    supported_sensor_names = {
+    # Scalar runtime channels are filtered against scalar registrations only.
+    # RawIMU/SmartIMU sensors live in their own runtime layouts and use the
+    # typed cache write surface, not the scalar one.
+    scalar_supported_sensor_names = {
         registration.sensor_name
-        for registrations in sensor_registration_map.values()
+        for unit_key, registrations in sensor_registration_map.items()
+        if unit_key in supported_scalar_sensor_units
         for registration in registrations
+    }
+    # Joint qpos scalars are not listed under Proximity/MiscData; they used to appear
+    # only via per-joint Servo registrations (removed to prevent duplicate IPUs).
+    # They must remain in the runtime list until `_align_servo_encoder_registrations_with_motors`
+    # can pair `jointpos_<j>` with positional servo motors.
+    scalar_supported_sensor_names |= {
+        channel.sensor_name
+        for channel in runtime_sensor_channels
+        if channel.sensor_tag == "jointpos"
     }
     runtime_sensor_channels = [
         channel
         for channel in runtime_sensor_channels
-        if channel.sensor_name in supported_sensor_names
+        if channel.sensor_name in scalar_supported_sensor_names
     ]
     logger.info(
         "[SENSORY][SUPPORTED] Registered FEAGI sensory cache units=%s total_channels=%d",
@@ -2495,20 +4350,13 @@ def main():
         channel.sensor_name: channel for channel in runtime_sensor_channels
     }
     sensor_group_index_start = len(vision_units)
+    # The actual (group_index, channel_index) layout is populated AFTER
+    # ``register_mujoco_sensors_in_cache`` runs because scalar sensor units
+    # now allocate one cortical area per registration; the SDK's returned
+    # group-id list is the authoritative source for routing publishes.
     sensor_cache_channel_layout: list[tuple[str, int, int, RuntimeSensorChannel]] = []
-    for group_offset, unit_key in enumerate(sorted(sensor_registration_map.keys())):
-        group_index = sensor_group_index_start + group_offset
-        registrations = sensor_registration_map[unit_key]
-        for channel_index, registration in enumerate(registrations):
-            channel = runtime_channel_by_name.get(registration.sensor_name)
-            if channel is None:
-                raise RuntimeError(
-                    "Missing runtime channel for registered sensor "
-                    f"'{registration.sensor_name}' ({unit_key})"
-                )
-            sensor_cache_channel_layout.append(
-                (unit_key, group_index, channel_index, channel)
-            )
+    raw_imu_runtime_layout: list[tuple[int, int, RawIMURuntimeChannel]] = []
+    smart_imu_runtime_layout: list[tuple[int, int, SmartIMURuntimeChannel]] = []
     logger.info(
         "[SENSORS] Parsed %d runtime sensor channels across %d FEAGI sensory units",
         len(runtime_sensor_channels),
@@ -2521,19 +4369,53 @@ def main():
         args.motor_gain,
         name_translator,
     )
+    _align_servo_encoder_registrations_with_motors(
+        sensor_registration_map,
+        runtime_sensor_channels,
+        group_channel_metadata,
+    )
+    if "Servo" not in sensor_registration_map:
+        _append_legacy_per_joint_servo_registrations(
+            model,
+            sensor_registration_map,
+            name_translator,
+        )
+    _collapse_proximity_to_mirrored_servo_subset(
+        sensor_registration_map,
+        runtime_sensor_channels,
+    )
+    scalar_supported_sensor_names, runtime_channel_by_name = (
+        _rebuild_sensory_scalar_cache_views_after_servo_mirror(
+            sensor_registration_map,
+            sensory_registration_metadata,
+            runtime_sensor_channels,
+            supported_scalar_sensor_units,
+        )
+    )
+    servo_registrations = sensor_registration_map.get("Servo", [])
+    if servo_registrations:
+        servo_absolute_count = sum(
+            1
+            for registration in servo_registrations
+            if registration.frame_change_handling == "absolute"
+        )
+        servo_incremental_count = sum(
+            1
+            for registration in servo_registrations
+            if registration.frame_change_handling == "incremental"
+        )
+        logger.info(
+            "[SENSORY][SERVO-ENCODER][MIRROR] After motor alignment: absolute=%d "
+            "incremental=%d total=%d",
+            servo_absolute_count,
+            servo_incremental_count,
+            len(servo_registrations),
+        )
     _log_discovered_capability_summary(
         sensor_registration_map,
         runtime_sensor_channels,
         motors,
         group_channels,
-    )
-    brain_output.set_device_registration_enricher(
-        _build_motor_registration_enricher(
-            model_load_path,
-            group_names,
-            group_channel_metadata,
-            sensory_registration_metadata,
-        )
     )
     logger.info("[MAP] Registered motor-channel mapping:")
     for (
@@ -2575,6 +4457,12 @@ def main():
             "vision/scalar sensory streaming enabled."
         )
 
+    misc_reset_group_id: Optional[int] = None
+    misc_reset_tap: Optional[MiscResetCommandTap] = None
+    spatial_pointer_runtime: Optional[MujocoSpatialPointerRuntime] = None
+    pointer_cfg: Optional[SpatialPointerConfig] = (
+        name_translator.spatial_pointer if name_translator is not None else None
+    )
     feagi_enabled = True
 
     # brain_output already configured before register_mujoco_motors()
@@ -2610,18 +4498,279 @@ def main():
                 sensor_group_index_start,
                 scalar_sensor_groups,
             )
+            # Build the runtime publish layout from the per-registration
+            # group ids returned by the SDK. Scalar units (Proximity, Shock,
+            # MiscData) use one cortical area per registration with
+            # channel_index=0, except grouped Proximity ``jointvel`` (one
+            # ``N``-channel area per motor group). Grouped ``Servo`` uses two
+            # areas per motor group (``N`` joint positions then ``N`` joint
+            # velocities from qvel), channel_index ``0..(N-1)`` in each strip,
+            # both registered as absolute-frame sensory Servo for FEAGI.
+            # Composite units (RawIMU, SmartIMU) keep the
+            # one-area-with-N-channels layout, indexed by registration order.
+            for unit_key in sorted(sensor_registration_map.keys()):
+                registrations = sensor_registration_map[unit_key]
+                group_ids = scalar_sensor_groups.get(unit_key, [])
+                if not registrations:
+                    continue
+                if unit_key == "RawIMU":
+                    if not group_ids:
+                        raise RuntimeError(
+                            "RawIMU registrations present but no cache group "
+                            "was assigned by register_mujoco_sensors_in_cache."
+                        )
+                    composite_group = group_ids[0]
+                    for channel_index, registration in enumerate(registrations):
+                        runtime_channel = raw_imu_runtime_by_site.get(
+                            registration.bundle_id
+                        )
+                        if runtime_channel is None:
+                            raise RuntimeError(
+                                "Missing RawIMU runtime layout for registered site "
+                                f"'{registration.bundle_id}'"
+                            )
+                        raw_imu_runtime_layout.append(
+                            (composite_group, channel_index, runtime_channel)
+                        )
+                    continue
+                if unit_key == "SmartIMU":
+                    if not group_ids:
+                        raise RuntimeError(
+                            "SmartIMU registrations present but no cache group "
+                            "was assigned by register_mujoco_sensors_in_cache."
+                        )
+                    composite_group = group_ids[0]
+                    for channel_index, registration in enumerate(registrations):
+                        runtime_channel = smart_imu_runtime_by_sensor.get(
+                            registration.sensor_name
+                        )
+                        if runtime_channel is None:
+                            raise RuntimeError(
+                                "Missing SmartIMU runtime layout for registered "
+                                f"sensor '{registration.sensor_name}'"
+                            )
+                        smart_imu_runtime_layout.append(
+                            (composite_group, channel_index, runtime_channel)
+                        )
+                    continue
+                if unit_key == "Servo" and _servo_registrations_use_motor_groups(registrations):
+                    motor_group_order = sorted(
+                        {
+                            registration.motor_servo_group_id
+                            for registration in registrations
+                            if registration.motor_servo_group_id is not None
+                        }
+                    )
+                    expected_groups = 2 * len(motor_group_order)
+                    if len(group_ids) != expected_groups:
+                        raise RuntimeError(
+                            f"Group-id count mismatch for grouped Servo '{unit_key}': "
+                            f"got {len(group_ids)} cache groups, expected {expected_groups} "
+                            f"(two strips per motor group) for {len(motor_group_order)} groups."
+                        )
+                    group_idx = 0
+                    for mid in motor_group_order:
+                        feagi_group_abs = int(group_ids[group_idx])
+                        feagi_group_inc = int(group_ids[group_idx + 1])
+                        group_idx += 2
+                        group_regs = [
+                            registration
+                            for registration in registrations
+                            if registration.motor_servo_group_id == mid
+                        ]
+                        pos_regs = sorted(
+                            (r for r in group_regs if r.sensor_tag == "jointpos"),
+                            key=lambda r: r.motor_servo_channel_index,
+                        )
+                        vel_regs = sorted(
+                            (r for r in group_regs if r.sensor_tag == "jointvel"),
+                            key=lambda r: r.motor_servo_channel_index,
+                        )
+                        for channel_index, registration in enumerate(pos_regs):
+                            channel = runtime_channel_by_name.get(registration.sensor_name)
+                            if channel is None:
+                                raise RuntimeError(
+                                    "Missing runtime channel for grouped Servo sensor "
+                                    f"'{registration.sensor_name}' ({unit_key})"
+                                )
+                            sensor_cache_channel_layout.append(
+                                (unit_key, feagi_group_abs, channel_index, channel)
+                            )
+                        for channel_index, registration in enumerate(vel_regs):
+                            channel = runtime_channel_by_name.get(registration.sensor_name)
+                            if channel is None:
+                                raise RuntimeError(
+                                    "Missing runtime channel for grouped Servo sensor "
+                                    f"'{registration.sensor_name}' ({unit_key})"
+                                )
+                            sensor_cache_channel_layout.append(
+                                (unit_key, feagi_group_inc, channel_index, channel)
+                            )
+                    continue
+                if unit_key == "Proximity" and _proximity_jointvel_uses_motor_groups(
+                    registrations
+                ):
+                    others, grouped_by_mid = _partition_proximity_motor_parity(
+                        registrations
+                    )
+                    expected_ids = len(others) + len(grouped_by_mid)
+                    if len(group_ids) != expected_ids:
+                        raise RuntimeError(
+                            f"Group-id count mismatch for grouped Proximity '{unit_key}': "
+                            f"got {len(group_ids)} cache groups, expected {expected_ids}."
+                        )
+                    gid_cursor = 0
+                    for reg in sorted(others, key=lambda r: r.sensor_name):
+                        feagi_group = int(group_ids[gid_cursor])
+                        gid_cursor += 1
+                        channel = runtime_channel_by_name.get(reg.sensor_name)
+                        if channel is None:
+                            raise RuntimeError(
+                                "Missing runtime channel for Proximity sensor "
+                                f"'{reg.sensor_name}' ({unit_key})"
+                            )
+                        sensor_cache_channel_layout.append(
+                            (unit_key, feagi_group, 0, channel)
+                        )
+                    for mid in sorted(grouped_by_mid.keys()):
+                        feagi_group = int(group_ids[gid_cursor])
+                        gid_cursor += 1
+                        for channel_index, registration in enumerate(grouped_by_mid[mid]):
+                            channel = runtime_channel_by_name.get(registration.sensor_name)
+                            if channel is None:
+                                raise RuntimeError(
+                                    "Missing runtime channel for grouped Proximity sensor "
+                                    f"'{registration.sensor_name}' ({unit_key})"
+                                )
+                            sensor_cache_channel_layout.append(
+                                (unit_key, feagi_group, channel_index, channel)
+                            )
+                    continue
+                if unit_key in _SCALAR_PER_REGISTRATION_SENSOR_UNIT_KEYS:
+                    if len(group_ids) != len(registrations):
+                        raise RuntimeError(
+                            f"Group-id count mismatch for unit '{unit_key}': "
+                            f"got {len(group_ids)} ids for {len(registrations)} "
+                            "registrations."
+                        )
+                    for registration, group_index in zip(
+                        registrations, group_ids
+                    ):
+                        channel = runtime_channel_by_name.get(
+                            registration.sensor_name
+                        )
+                        if channel is None:
+                            raise RuntimeError(
+                                "Missing runtime channel for registered sensor "
+                                f"'{registration.sensor_name}' ({unit_key})"
+                            )
+                        sensor_cache_channel_layout.append(
+                            (unit_key, group_index, 0, channel)
+                        )
+                    continue
+                # Other (non-scalar, non-IMU) units: legacy multi-channel
+                # layout. Treated as a single cortical area indexed by
+                # registration order. Unreachable for current unit set but
+                # kept for forward compatibility with new composite kinds.
+                if not group_ids:
+                    raise RuntimeError(
+                        f"Unit '{unit_key}' has registrations but no cache group "
+                        "was assigned by register_mujoco_sensors_in_cache."
+                    )
+                composite_group = group_ids[0]
+                for channel_index, registration in enumerate(registrations):
+                    channel = runtime_channel_by_name.get(registration.sensor_name)
+                    if channel is None:
+                        raise RuntimeError(
+                            "Missing runtime channel for registered sensor "
+                            f"'{registration.sensor_name}' ({unit_key})"
+                        )
+                    sensor_cache_channel_layout.append(
+                        (unit_key, composite_group, channel_index, channel)
+                    )
             brain_output.register_motor_groups(
                 group_channels,
                 z_neuron_resolution=10,
             )
+            reserved_motor_groups: set[int] = set()
+            if pointer_cfg is not None:
+                reserved_motor_groups.add(int(pointer_cfg.group))
+            misc_reset_group_id, misc_reset_tap = register_misc_reset_output_in_cache(
+                group_channels,
+                reserved_group_ids=reserved_motor_groups,
+            )
+            if pointer_cfg is not None:
+                logger.info(
+                    "[SPATIAL_POINTER] Configured in %s; registering after FEAGI "
+                    "connect so servo OPUs are not blocked by pointer auto-create.",
+                    name_translator.mapping_path,
+                )
+            elif os.path.isfile(name_translator.mapping_path):
+                logger.info(
+                    "[SPATIAL_POINTER] Not configured in %s (Cartesian FEAGI motor "
+                    "output will not drive the arm).",
+                    name_translator.mapping_path,
+                )
         except Exception as e:
             raise RuntimeError(
                 f"Failed to register motor devices in ConnectorAgent: {e}"
             ) from e
 
+        misc_reset_group_ids: set[int] = (
+            {misc_reset_group_id} if misc_reset_group_id is not None else set()
+        )
+        # Build a (unit_key, cortical_unit_index) -> SensorRegistration map for
+        # scalar units that allocate one cortical area per registration. The
+        # enricher uses this to attach the right friendly name to each cortical
+        # area regardless of how the Rust cache happens to serialize entries
+        # (HashMap iteration order is non-deterministic across processes).
+        sensory_registration_by_group_id: dict[
+            str, dict[int, SensorRegistration]
+        ] = {}
+        for unit_key, registrations_for_unit in sensor_registration_map.items():
+            if unit_key not in _SCALAR_PER_REGISTRATION_SENSOR_UNIT_KEYS:
+                continue
+            if unit_key == "Servo" and _servo_registrations_use_motor_groups(
+                registrations_for_unit
+            ):
+                continue
+            if unit_key == "Proximity" and _proximity_jointvel_uses_motor_groups(
+                registrations_for_unit
+            ):
+                continue
+            assigned_group_ids = scalar_sensor_groups.get(unit_key, [])
+            if len(assigned_group_ids) != len(registrations_for_unit):
+                continue
+            sensory_registration_by_group_id[unit_key] = {
+                int(group_id): registration
+                for registration, group_id in zip(
+                    registrations_for_unit, assigned_group_ids
+                )
+            }
+        brain_output.set_device_registration_enricher(
+            _build_motor_registration_enricher(
+                model_load_path,
+                group_names,
+                group_channel_metadata,
+                sensory_registration_metadata,
+                misc_reset_group_ids=misc_reset_group_ids,
+                sensory_registration_by_group_id=sensory_registration_by_group_id,
+            )
+        )
+
         if not sensors_only_feagi:
             logger.info("[CONN] Connecting motor stream (Python SDK)...")
             expected_motor_ids = _build_expected_motor_cortical_ids(motors)
+            cache_obj = getattr(brain_output, "_cache", None)
+            if (
+                cache_obj is not None
+                and hasattr(cache_obj, "get_motor_cortical_ids_for_verification")
+            ):
+                derived_motor_ids = list(
+                    cache_obj.get_motor_cortical_ids_for_verification()
+                )
+                if derived_motor_ids:
+                    expected_motor_ids = derived_motor_ids
             if hasattr(brain_output, "_collect_motor_cortical_ids"):
                 brain_output._collect_motor_cortical_ids = lambda: list(expected_motor_ids)
         else:
@@ -2629,6 +4778,23 @@ def main():
 
         brain_output.connect()
         logger.info("   [OK] FEAGI connection established!")
+        if (
+            pointer_cfg is not None
+            and not sensors_only_feagi
+            and feagi_enabled
+        ):
+            try:
+                spatial_pointer_runtime = _register_spatial_pointer_post_connect(
+                    pointer_cfg,
+                    name_translator,
+                    model,
+                )
+            except Exception as pointer_exc:
+                logger.warning(
+                    "[SPATIAL_POINTER] Post-connect registration failed; "
+                    "positional servo motor control remains active: %s",
+                    pointer_exc,
+                )
         try:
             _enforce_feagi_model_rate_strict(
                 model,
@@ -2648,22 +4814,116 @@ def main():
         )
         feagi_enabled = False
 
+    # Recovery monitor: detects genome reloads, FEAGI restarts, and network
+    # drops via FEAGI's health endpoint. Decision logic lives in the
+    # feagi-agent Rust crate; the Python SDK wrapper is a thin facade so
+    # behavior is identical across all language SDKs.
+    #
+    # Defaults come from the centralized FEAGI config file
+    # ([recovery] section in feagi_configuration.toml). The four
+    # --feagi-* CLI flags act as per-launch overrides only; users running
+    # the controller from the command line never have to provide them.
+    feagi_health_monitor = None
+    if feagi_enabled:
+        try:
+            from feagi.config import load_recovery_config
+            from feagi.pns.health_monitor import FeagiHealthMonitor
+
+            recovery_cfg = load_recovery_config()
+            resolved_poll_interval_s = (
+                args.feagi_health_poll_interval_s
+                if args.feagi_health_poll_interval_s is not None
+                else recovery_cfg.health_poll_interval_s
+            )
+            resolved_fetch_timeout_ms = (
+                args.feagi_health_fetch_timeout_ms
+                if args.feagi_health_fetch_timeout_ms is not None
+                else recovery_cfg.health_fetch_timeout_ms
+            )
+            resolved_cooldown_ms = (
+                args.feagi_reconnect_cooldown_ms
+                if args.feagi_reconnect_cooldown_ms is not None
+                else recovery_cfg.reconnect_cooldown_ms
+            )
+            resolved_max_failures = (
+                args.feagi_reconnect_max_failures
+                if args.feagi_reconnect_max_failures is not None
+                else recovery_cfg.reconnect_max_failures
+            )
+
+            for label, value in (
+                ("--feagi-health-poll-interval-s", resolved_poll_interval_s),
+                ("--feagi-health-fetch-timeout-ms", resolved_fetch_timeout_ms),
+                ("--feagi-reconnect-cooldown-ms", resolved_cooldown_ms),
+                ("--feagi-reconnect-max-failures", resolved_max_failures),
+            ):
+                if value is None or value <= 0:
+                    logger.info(
+                        "[RECOVERY][FAIL] %s must be > 0 (got %s); fix the "
+                        "[recovery] section of your FEAGI config or pass "
+                        "an explicit override.",
+                        label,
+                        value,
+                    )
+                    _cleanup_mujoco_temp_dirs(
+                        temp_model_dir, keyframe_recovery_dir
+                    )
+                    return 1
+            if resolved_fetch_timeout_ms >= resolved_poll_interval_s * 1000.0:
+                logger.info(
+                    "[RECOVERY][FAIL] --feagi-health-fetch-timeout-ms (%s ms) "
+                    "must be < --feagi-health-poll-interval-s * 1000 (%s ms).",
+                    resolved_fetch_timeout_ms,
+                    resolved_poll_interval_s * 1000.0,
+                )
+                _cleanup_mujoco_temp_dirs(temp_model_dir, keyframe_recovery_dir)
+                return 1
+
+            args.feagi_health_poll_interval_s = resolved_poll_interval_s
+            args.feagi_health_fetch_timeout_ms = resolved_fetch_timeout_ms
+            args.feagi_reconnect_cooldown_ms = resolved_cooldown_ms
+            args.feagi_reconnect_max_failures = resolved_max_failures
+
+            feagi_health_monitor = FeagiHealthMonitor(
+                feagi_api_host=args.ip,
+                feagi_api_port=args.port,
+                fetch_timeout_ms=resolved_fetch_timeout_ms,
+                cooldown_ms=resolved_cooldown_ms,
+                max_consecutive_failures=resolved_max_failures,
+                trigger_on_session_changed=True,
+                trigger_on_genome_changed=True,
+                trigger_on_genome_load_completed=True,
+                trigger_on_back_online=True,
+                trigger_on_brain_ready=False,
+                trigger_on_transport_send_failed=True,
+            )
+            logger.info(
+                "[RECOVERY] FEAGI health monitor active "
+                "(poll=%ss, fetch_timeout=%dms, cooldown=%dms, max_failures=%d)",
+                resolved_poll_interval_s,
+                resolved_fetch_timeout_ms,
+                resolved_cooldown_ms,
+                resolved_max_failures,
+            )
+        except Exception as monitor_init_error:
+            logger.info(
+                "[RECOVERY][FAIL] Could not initialize FeagiHealthMonitor: %s",
+                monitor_init_error,
+            )
+            _cleanup_mujoco_temp_dirs(temp_model_dir, keyframe_recovery_dir)
+            return 1
+
     # Launch MuJoCo viewer
     logger.info("\n[VIEW] Launching MuJoCo viewer...")
     
     with mujoco.viewer.launch_passive(model, data) as viewer:
         
         # Reset to initial pose
-        # For models with keyframes, try to use standing pose (keyframe 4 for humanoid)
-        if model.nkey > 4:
-            mujoco.mj_resetDataKeyframe(model, data, 4)
-        else:
-            mujoco.mj_resetData(model, data)
+        _reset_mujoco_model_state(model, data)
 
         logger.info("[OK] Viewer running!")
         logger.info("   Press ESC in the viewer window to exit")
         logger.info("   You can manually move joints with the mouse")
-        logger.info("   Physics simulation runs at 120 FPS")
         if feagi_enabled:
             if sensors_only_feagi:
                 logger.info("   FEAGI sensory streaming: ACTIVE (no motors)")
@@ -2674,7 +4934,40 @@ def main():
 
         start_time = time.time()
         frame_number = 0
+        control_dt_s = float(model.opt.timestep)
+        model_rate_hz = 1.0 / control_dt_s if control_dt_s > 0.0 else float("nan")
+        loop_rate_hz = (
+            float(args.loop_rate_hz)
+            if args.loop_rate_hz is not None
+            else model_rate_hz
+        )
+        if not np.isfinite(loop_rate_hz) or loop_rate_hz <= 0.0:
+            raise RuntimeError(
+                f"Invalid loop rate {loop_rate_hz}. "
+                "Provide --loop-rate-hz > 0 or use a model with valid timestep."
+            )
+        if not np.isfinite(args.vision_rate_hz) or args.vision_rate_hz <= 0.0:
+            raise RuntimeError(
+                f"Invalid --vision-rate-hz={args.vision_rate_hz}; value must be > 0."
+            )
+        loop_period_s = 1.0 / loop_rate_hz
+        vision_period_s = 1.0 / float(args.vision_rate_hz)
+        next_vision_due_at = time.monotonic()
+        logger.info(
+            "[RATE] Loop=%.2f Hz (period=%.6fs) | Model=%.2f Hz (timestep=%.6fs) | Vision cap=%.2f Hz",
+            loop_rate_hz,
+            loop_period_s,
+            model_rate_hz,
+            control_dt_s,
+            args.vision_rate_hz,
+        )
+        spatial_pointer_last_target_m: Optional[Tuple[float, float, float]] = None
         last_sim_time = float(data.time)
+        # FEAGI recovery loop bookkeeping. Use a monotonic clock for cooldowns
+        # because it cannot jump backwards under NTP/sleep, which would otherwise
+        # confuse the Rust ReconnectPolicy.
+        last_health_tick_at: float = time.monotonic()
+        transport_send_failed_since_last_tick: bool = False
         motor_telemetry_state: dict[tuple[int, int], dict[str, float]] = {}
         last_motor_snapshot: dict[str, float] = {}
         motor_channel_labels: dict[tuple[int, int], str] = {
@@ -2691,8 +4984,8 @@ def main():
                 _encoding,
             ) in motors
         }
-        telemetry_window_frames = 120
-        recent_change_window_frames = SPEED * 5
+        telemetry_window_frames = max(1, int(round(loop_rate_hz)))
+        recent_change_window_frames = max(1, int(round(loop_rate_hz * 5.0)))
         window_changed_samples = 0
         window_changed_channels: set[tuple[int, int]] = set()
         window_group_stats: dict[int, dict[str, float]] = {}
@@ -2725,39 +5018,87 @@ def main():
             sim_reset_detected = float(data.time) + 1e-12 < last_sim_time
             if sim_reset_detected:
                 logger.info("[VIEW] Simulation reset detected; clearing motor runtime state")
-                for (
-                    motor,
-                    _actuator_name,
-                    actuator_idx,
-                    min_val,
-                    max_val,
-                    _group_id,
-                    _channel_index,
-                    _device_type,
-                    _encoding,
-                ) in motors:
-                    neutral_ctrl = 0.0
-                    if isinstance(motor, ServoMotor):
-                        neutral_ctrl = (min_val + max_val) / 2.0
-                        if hasattr(motor, "_current_angle"):
-                            setattr(motor, "_current_angle", neutral_ctrl)
-                    elif isinstance(motor, RotaryMotor):
-                        neutral_ctrl = 0.0
-                        if hasattr(motor, "_current_speed"):
-                            setattr(motor, "_current_speed", 0.0)
-                    data.ctrl[actuator_idx] = neutral_ctrl
-                    if hasattr(motor, "_last_rx_mode"):
-                        setattr(motor, "_last_rx_mode", None)
-                motor_telemetry_state.clear()
-                last_motor_snapshot.clear()
+                _clear_motor_runtime_state_after_reset(
+                    motors,
+                    data,
+                    motor_telemetry_state,
+                    last_motor_snapshot,
+                )
+
+            # FEAGI recovery monitor: poll health, ask the (Rust) policy
+            # whether to reconnect, and act on the decision. The decision
+            # logic itself is identical across all SDKs because it lives in
+            # feagi-agent's recovery module.
+            if feagi_enabled and feagi_health_monitor is not None:
+                now_monotonic = time.monotonic()
+                if (now_monotonic - last_health_tick_at) >= args.feagi_health_poll_interval_s:
+                    last_health_tick_at = now_monotonic
+                    pending_send_failure = transport_send_failed_since_last_tick
+                    transport_send_failed_since_last_tick = False
+                    try:
+                        tick_result = feagi_health_monitor.tick(
+                            now_ms=int(now_monotonic * 1000.0),
+                            transport_send_failed=pending_send_failure,
+                        )
+                    except Exception as monitor_err:
+                        logger.warning(
+                            "[RECOVERY] Health monitor tick failed: %s",
+                            monitor_err,
+                        )
+                        tick_result = None
+                    if tick_result is not None:
+                        for event in tick_result.events:
+                            logger.info(
+                                "[RECOVERY] Observed health event: %s",
+                                event.kind,
+                            )
+                        decision = tick_result.decision
+                        if decision.is_attempt_now():
+                            logger.info(
+                                "[RECOVERY] Reconnect requested (reason=%s); rebuilding session...",
+                                decision.reason,
+                            )
+                            try:
+                                brain_output.reconnect(reason=decision.reason)
+                                feagi_health_monitor.record_attempt_succeeded()
+                                logger.info(
+                                    "[RECOVERY] Reconnect succeeded "
+                                    "(reason=%s)",
+                                    decision.reason,
+                                )
+                            except Exception as reconnect_err:
+                                feagi_health_monitor.record_attempt_failed()
+                                logger.warning(
+                                    "[RECOVERY] Reconnect attempt failed "
+                                    "(reason=%s): %s",
+                                    decision.reason,
+                                    reconnect_err,
+                                )
+                        elif decision.is_give_up():
+                            logger.error(
+                                "[RECOVERY] Giving up after %d consecutive "
+                                "failed reconnects; exiting controller.",
+                                decision.consecutive_failures,
+                            )
+                            break
 
             # Receive motor commands from FEAGI
             changed_in_tick = 0
             frame_group_stats: dict[int, dict[str, float]] = {}
             changed_channels_this_tick: list[tuple[int, int, str, float, float]] = []
             if feagi_enabled:
+                feagi_receive_error: Optional[BaseException] = None
                 try:
                     brain_output.receive()
+                except Exception as receive_exc:
+                    feagi_receive_error = receive_exc
+                    if frame_number % 120 == 0:
+                        logger.warning(
+                            "[FEAGI] Motor receive failed: %s",
+                            receive_exc,
+                        )
+
+                if feagi_receive_error is None:
                     motor_snapshot = getattr(brain_output, "_motor_data", {}) or {}
                     if isinstance(motor_snapshot, dict):
                         # Log only on snapshot changes to avoid spam.
@@ -2778,6 +5119,23 @@ def main():
                                 if isinstance(v, (int, float))
                             }
 
+                    if misc_reset_tap is not None:
+                        reset_triggered = misc_reset_tap.consume_reset_pulse()
+                        misc_reset_tap.notify_burst_complete()
+                        if reset_triggered:
+                            logger.info(
+                                "[MISC-RESET] Activation detected at group=%d channel=0; resetting model",
+                                -1 if misc_reset_group_id is None else misc_reset_group_id,
+                            )
+                            _reset_mujoco_model_state(model, data)
+                            _clear_motor_runtime_state_after_reset(
+                                motors,
+                                data,
+                                motor_telemetry_state,
+                                last_motor_snapshot,
+                            )
+                            continue
+
                     # Apply FEAGI commands to MuJoCo actuators
                     for (
                         motor,
@@ -2792,13 +5150,36 @@ def main():
                     ) in motors:
                         state_key = (group_id, channel_index)
                         prev_state = motor_telemetry_state.get(state_key, {})
-                        last_seen_rx_seq = getattr(motor, "_last_seen_rx_seq", -1)
+                        prev_norm_cmd = float(prev_state.get("last_norm_cmd", 0.0))
+                        prev_applied_ctrl = float(prev_state.get("last_applied_ctrl", 0.0))
                         norm_cmd = 0.0
                         applied_ctrl = 0.0
+                        # Canonical decoded value comes from the shared Rust motor
+                        # snapshot (group:channel:mode). register_motor_groups()
+                        # deliberately skips per-output SDK callbacks, so
+                        # motor.get_angle()/get_speed() never advance; the snapshot
+                        # is the authoritative source for every registered channel.
+                        snap_abs = motor_snapshot.get(
+                            f"{group_id}:{channel_index}:absolute"
+                        )
+                        snap_inc = motor_snapshot.get(
+                            f"{group_id}:{channel_index}:incremental"
+                        )
+                        snap_value = snap_abs if snap_abs is not None else snap_inc
+                        snap_mode = "absolute" if snap_abs is not None else (
+                            "incremental" if snap_inc is not None else None
+                        )
                         if isinstance(motor, ServoMotor):
-                            angle = motor.get_angle()
                             center = (min_val + max_val) / 2.0
                             half_range = (max_val - min_val) / 2.0
+                            # ServoMotor decodes a position in [0, 1] (the Rust
+                            # decoder integrates incremental motion into the same
+                            # 0..1 position), mapped linearly into the joint range.
+                            if snap_value is not None:
+                                pos01 = _clamp(float(snap_value), 0.0, 1.0)
+                                angle = min_val + (max_val - min_val) * pos01
+                            else:
+                                angle = center
                             if half_range > 0:
                                 norm_cmd = _clamp(
                                     (angle - center) / half_range,
@@ -2811,96 +5192,30 @@ def main():
                                 angle = center + ((angle - center) * args.motor_gain)
                                 angle = max(min_val, min(max_val, angle))
 
-                            rx_mode = getattr(motor, "_last_rx_mode", None)
+                            rx_mode = snap_mode
                             rx_seq = getattr(motor, "_rx_command_seq", None)
-                            control_semantics = getattr(
-                                motor,
-                                "control_semantics",
-                                "normalized_position",
-                            )
-                            is_incremental = rx_mode == "incremental"
-                            is_effort_absolute = (
-                                rx_mode == "absolute"
-                                and control_semantics == "normalized_effort_drive"
-                            )
-                            has_new_packet = _motor_rx_is_new_packet(
-                                rx_seq, int(last_seen_rx_seq)
-                            )
-                            if (is_incremental and not has_new_packet) or (
-                                is_effort_absolute and not has_new_packet
-                            ):
-                                # Sparse command handling: hold the last applied target until
-                                # a new packet arrives. This keeps both absolute and incremental
-                                # control responsive under low-rate command streams.
-                                held_ctrl = float(
-                                    getattr(
-                                        motor,
-                                        "_latched_ctrl",
-                                        prev_state.get("last_applied_ctrl", center),
-                                    )
-                                )
-                                held_ctrl = max(min_val, min(max_val, held_ctrl))
-                                data.ctrl[actuator_idx] = held_ctrl
-                                applied_ctrl = held_ctrl
-                                if half_range > 0:
-                                    norm_cmd = _clamp(
-                                        (held_ctrl - center) / half_range,
-                                        -1.0,
-                                        1.0,
-                                    )
-                                else:
-                                    norm_cmd = 0.0
-                            else:
-                                data.ctrl[actuator_idx] = angle
-                                applied_ctrl = angle
-                                setattr(motor, "_latched_ctrl", float(angle))
-                                if isinstance(rx_seq, int):
-                                    setattr(motor, "_last_seen_rx_seq", int(rx_seq))
+                            data.ctrl[actuator_idx] = angle
+                            applied_ctrl = angle
+                            setattr(motor, "_latched_ctrl", float(angle))
+                            if isinstance(rx_seq, int):
+                                setattr(motor, "_last_seen_rx_seq", int(rx_seq))
                         elif isinstance(motor, RotaryMotor):
-                            speed = motor.get_speed()
-                            norm_cmd = _clamp(float(speed), -1.0, 1.0)
+                            # RotaryMotor decodes a signed speed in [-1, 1].
+                            if snap_value is not None:
+                                speed = _clamp(float(snap_value), -1.0, 1.0)
+                            else:
+                                speed = 0.0
+                            norm_cmd = speed
                             if args.motor_gain != 1.0:
                                 speed = max(-1.0, min(1.0, speed * args.motor_gain))
 
-                            rx_mode = getattr(motor, "_last_rx_mode", None)
+                            rx_mode = snap_mode
                             rx_seq = getattr(motor, "_rx_command_seq", None)
-                            control_semantics = getattr(
-                                motor,
-                                "control_semantics",
-                                "normalized_velocity",
-                            )
-                            is_incremental = rx_mode == "incremental"
-                            is_effort_absolute = (
-                                rx_mode == "absolute"
-                                and control_semantics == "normalized_effort_drive"
-                            )
-                            has_new_packet = _motor_rx_is_new_packet(
-                                rx_seq, int(last_seen_rx_seq)
-                            )
-                            if (is_incremental and not has_new_packet) or (
-                                is_effort_absolute and not has_new_packet
-                            ):
-                                # Sparse command handling: keep previous commanded speed.
-                                held_speed = _clamp(
-                                    float(
-                                        getattr(
-                                            motor,
-                                            "_latched_ctrl",
-                                            prev_state.get("last_applied_ctrl", 0.0),
-                                        )
-                                    ),
-                                    -1.0,
-                                    1.0,
-                                )
-                                data.ctrl[actuator_idx] = held_speed
-                                applied_ctrl = held_speed
-                                norm_cmd = held_speed
-                            else:
-                                data.ctrl[actuator_idx] = speed
-                                applied_ctrl = speed
-                                setattr(motor, "_latched_ctrl", float(speed))
-                                if isinstance(rx_seq, int):
-                                    setattr(motor, "_last_seen_rx_seq", int(rx_seq))
+                            data.ctrl[actuator_idx] = speed
+                            applied_ctrl = speed
+                            setattr(motor, "_latched_ctrl", float(speed))
+                            if isinstance(rx_seq, int):
+                                setattr(motor, "_last_seen_rx_seq", int(rx_seq))
                         else:
                             continue
                         state = motor_telemetry_state.setdefault(
@@ -2917,8 +5232,8 @@ def main():
                         if isinstance(rx_seq_for_state, int):
                             state["last_rx_seq"] = float(rx_seq_for_state)
                         was_changed = (
-                            abs(norm_cmd - state["last_norm_cmd"]) > 1e-6
-                            or abs(applied_ctrl - state["last_applied_ctrl"]) > 1e-6
+                            abs(norm_cmd - prev_norm_cmd) > 1e-6
+                            or abs(applied_ctrl - prev_applied_ctrl) > 1e-6
                         )
                         if was_changed:
                             changed_in_tick += 1
@@ -2947,12 +5262,34 @@ def main():
                                 "None" if rx_mode is None else str(rx_mode),
                                 norm_cmd,
                                 applied_ctrl,
-                                applied_ctrl - state["last_applied_ctrl"],
+                                applied_ctrl - prev_applied_ctrl,
                                 motor.__class__.__module__,
                                 motor.__class__.__name__,
                                 hasattr(motor, "_on_motor_command"),
                                 hasattr(motor, "_last_rx_value"),
                             )
+                            if isinstance(motor, ServoMotor):
+                                joint_id = int(model.actuator_trnid[actuator_idx, 0])
+                                qpos_addr = (
+                                    int(model.jnt_qposadr[joint_id]) if joint_id >= 0 else -1
+                                )
+                                qpos_now = (
+                                    float(data.qpos[qpos_addr])
+                                    if qpos_addr >= 0 and qpos_addr < len(data.qpos)
+                                    else float("nan")
+                                )
+                                logger.info(
+                                    "[ACTUATOR-APPLY] actuator=%s idx=%d group=%d ch=%d "
+                                    "ctrl=%.6f qpos=%.6f qpos_delta=%.6f rx_mode=%s",
+                                    actuator_name,
+                                    actuator_idx,
+                                    group_id,
+                                    channel_index,
+                                    applied_ctrl,
+                                    qpos_now,
+                                    applied_ctrl - qpos_now if np.isfinite(qpos_now) else float("nan"),
+                                    "None" if rx_mode is None else str(rx_mode),
+                                )
                         state["last_norm_cmd"] = norm_cmd
                         state["last_applied_ctrl"] = applied_ctrl
 
@@ -2971,9 +5308,24 @@ def main():
                         if was_changed:
                             stats["changed"] += 1.0
 
+                    if spatial_pointer_runtime is not None:
+                        spatial_pointer_last_target_m = (
+                            _apply_mujoco_spatial_pointer_target(
+                                model,
+                                data,
+                                spatial_pointer_runtime,
+                                spatial_pointer_last_target_m,
+                                control_dt_s,
+                            )
+                        )
+
                     sensory_samples_written = 0
 
-                    if vision_renderer is not None:
+                    now_monotonic = time.monotonic()
+                    should_write_vision = (
+                        vision_renderer is not None and now_monotonic >= next_vision_due_at
+                    )
+                    if should_write_vision:
                         for (
                             camera_name,
                             camera_index,
@@ -3005,6 +5357,8 @@ def main():
                                         camera_name,
                                         vision_write_error,
                                     )
+                        while next_vision_due_at <= now_monotonic:
+                            next_vision_due_at += vision_period_s
 
                     if runtime_sensor_channels:
                         unsupported_units: set[str] = set()
@@ -3055,13 +5409,132 @@ def main():
                                     runtime_unsupported_unit_write_failures.get(unit_key, 0),
                                 )
 
+                    # RawIMU per-axis writes. Each (group, channel_index) is one
+                    # MuJoCo `site`. Missing axes (no sensor declared, or no
+                    # cutoff-based normalization reference) are silently left
+                    # untouched in the cache so previously-written values are
+                    # preserved instead of being clobbered with implicit zeros.
+                    if raw_imu_runtime_layout:
+                        for group_index, channel_index, raw_imu in raw_imu_runtime_layout:
+                            if raw_imu.accelerometer is not None:
+                                triple = _read_imu_axis_triple(data, raw_imu.accelerometer)
+                                if triple is not None:
+                                    normalized_triple = _normalize_imu_axis_triple(
+                                        triple, raw_imu.accelerometer,
+                                    )
+                                    if normalized_triple is not None:
+                                        try:
+                                            brain_output.write_sensor_raw_imu_accelerometer(
+                                                group=group_index,
+                                                channel_index=channel_index,
+                                                accelerometer_xyz=normalized_triple,
+                                            )
+                                            sensory_samples_written += 1
+                                        except Exception as imu_write_error:
+                                            if frame_number % 240 == 0:
+                                                logger.warning(
+                                                    "[RAW-IMU][SKIP-WRITE][accel] site=%s "
+                                                    "group=%d channel=%d error=%s",
+                                                    raw_imu.site_name,
+                                                    group_index,
+                                                    channel_index,
+                                                    imu_write_error,
+                                                )
+                            if raw_imu.gyroscope is not None:
+                                triple = _read_imu_axis_triple(data, raw_imu.gyroscope)
+                                if triple is not None:
+                                    normalized_triple = _normalize_imu_axis_triple(
+                                        triple, raw_imu.gyroscope,
+                                    )
+                                    if normalized_triple is not None:
+                                        try:
+                                            brain_output.write_sensor_raw_imu_gyroscope(
+                                                group=group_index,
+                                                channel_index=channel_index,
+                                                gyroscope_xyz=normalized_triple,
+                                            )
+                                            sensory_samples_written += 1
+                                        except Exception as imu_write_error:
+                                            if frame_number % 240 == 0:
+                                                logger.warning(
+                                                    "[RAW-IMU][SKIP-WRITE][gyro] site=%s "
+                                                    "group=%d channel=%d error=%s",
+                                                    raw_imu.site_name,
+                                                    group_index,
+                                                    channel_index,
+                                                    imu_write_error,
+                                                )
+                            if raw_imu.magnetometer is not None:
+                                triple = _read_imu_axis_triple(data, raw_imu.magnetometer)
+                                if triple is not None:
+                                    normalized_triple = _normalize_imu_axis_triple(
+                                        triple, raw_imu.magnetometer,
+                                    )
+                                    if normalized_triple is not None:
+                                        try:
+                                            brain_output.write_sensor_raw_imu_magnetometer(
+                                                group=group_index,
+                                                channel_index=channel_index,
+                                                magnetometer_xyz=normalized_triple,
+                                            )
+                                            sensory_samples_written += 1
+                                        except Exception as imu_write_error:
+                                            if frame_number % 240 == 0:
+                                                logger.warning(
+                                                    "[RAW-IMU][SKIP-WRITE][mag] site=%s "
+                                                    "group=%d channel=%d error=%s",
+                                                    raw_imu.site_name,
+                                                    group_index,
+                                                    channel_index,
+                                                    imu_write_error,
+                                                )
+
+                    # SmartIMU quaternion writes. Each (group, channel_index)
+                    # is one MuJoCo orientation-quaternion sensor.
+                    if smart_imu_runtime_layout:
+                        for group_index, channel_index, smart_imu in smart_imu_runtime_layout:
+                            quaternion = _read_imu_quaternion(data, smart_imu)
+                            if quaternion is None:
+                                continue
+                            try:
+                                brain_output.write_sensor_smart_imu(
+                                    group=group_index,
+                                    channel_index=channel_index,
+                                    quaternion_wxyz=quaternion,
+                                )
+                                sensory_samples_written += 1
+                            except Exception as smart_imu_error:
+                                if frame_number % 240 == 0:
+                                    logger.warning(
+                                        "[SMART-IMU][SKIP-WRITE] sensor=%s "
+                                        "group=%d channel=%d error=%s",
+                                        smart_imu.sensor_name,
+                                        group_index,
+                                        channel_index,
+                                        smart_imu_error,
+                                    )
+
                     if sensory_samples_written > 0:
-                        brain_output.flush_sensory_bytes()
-                except Exception as e:
-                    if frame_number % 120 == 0:
-                        logger.info(f"   [WARN] FEAGI receive error: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        try:
+                            sent_bytes = brain_output.flush_sensory_bytes()
+                            if (
+                                args.enable_telemetry
+                                and sent_bytes > 0
+                                and frame_number % 240 == 0
+                            ):
+                                logger.info(
+                                    "[SENSORY] Flushed %d bytes to FEAGI",
+                                    sent_bytes,
+                                )
+                        except Exception as sensory_send_exc:
+                            # Only sensory transport failures should trigger
+                            # reconnect policy (not motor receive/decode).
+                            transport_send_failed_since_last_tick = True
+                            if frame_number % 120 == 0:
+                                logger.warning(
+                                    "[SENSORY] Transport send failed: %s",
+                                    sensory_send_exc,
+                                )
 
             if feagi_enabled and args.enable_telemetry:
                 window_changed_samples += changed_in_tick
@@ -3085,8 +5558,12 @@ def main():
                         stats["max_abs"],
                     )
 
-            # Step simulation
-            mujoco.mj_step(model, data)
+            # Step simulation. Held under introspection_step_lock so the MCP
+            # HTTP server can read state coherently from another thread.
+            with introspection_step_lock:
+                if introspection_server is not None:
+                    introspection_server.drain_pending_writes()
+                mujoco.mj_step(model, data)
             limit_corrections = _enforce_joint_limits(model, data, joint_limit_guards)
             if limit_corrections and args.enable_telemetry:
                 window_joint_limit_corrections += len(limit_corrections)
@@ -3263,7 +5740,7 @@ def main():
 
             # Maintain simulation speed
             elapsed = time.time() - step_start
-            sleep_time = (1.0 / SPEED) - elapsed
+            sleep_time = loop_period_s - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -3281,6 +5758,12 @@ def main():
             logger.info("[OK] Disconnected from FEAGI motor stream")
         except Exception as e:
             logger.info(f"[WARN] Error disconnecting: {e}")
+
+    if introspection_server is not None:
+        try:
+            introspection_server.stop()
+        except Exception as e:
+            logger.info("[WARN] Failed to stop MCP introspection server: %s", e)
 
     _cleanup_mujoco_temp_dirs(temp_model_dir, keyframe_recovery_dir)
 

@@ -15,7 +15,9 @@ Copyright 2026 Neuraville Inc.
 """
 from __future__ import annotations
 
+import errno
 import logging
+import socket
 from enum import Enum
 from typing import Final, List, Optional, Sequence
 
@@ -23,6 +25,8 @@ logger = logging.getLogger("xarm_controller.device")
 
 #: xArm SDK success return code.
 _XARM_CODE_OK: Final[int] = 0
+#: Timeout (seconds) for preflight TCP check before SDK handshake.
+_XARM_CONNECT_PREFLIGHT_TIMEOUT_S: Final[float] = 3.0
 
 
 class XArmDeviceError(RuntimeError):
@@ -34,6 +38,7 @@ class GripperAction(str, Enum):
 
     OPEN = "open"
     CLOSE = "close"
+    STOP = "stop"
     VACUUM_ON = "vacuum_on"
     VACUUM_OFF = "vacuum_off"
 
@@ -59,22 +64,54 @@ class XArmDevice:
         Raises:
             XArmDeviceError: If the SDK cannot be imported or the arm rejects setup.
         """
+        sdk_logger = None
+        sdk_logger_level: Optional[int] = None
         try:
             from xarm.wrapper import XArmAPI
+            from xarm.core.config.x_config import XCONF
+            from xarm.core.utils.log import logger as xarm_sdk_logger
         except ImportError as exc:  # pragma: no cover - import guard
             raise XArmDeviceError(
                 "xarm-python-sdk is not installed in the controller environment."
             ) from exc
-        arm = XArmAPI(ip)
+        control_port = int(getattr(XCONF.SocketConf, "TCP_CONTROL_PORT", 502))
+        cls._preflight_socket(ip=ip, port=control_port)
+        try:
+            # Keep startup logs focused: the SDK emits repeated per-attempt
+            # "xArm is not connected" errors while probing firmware version.
+            sdk_logger = xarm_sdk_logger
+            sdk_logger_level = sdk_logger.level
+            sdk_logger.setLevel(logging.CRITICAL)
+            arm = XArmAPI(ip)
+        except Exception as exc:
+            raise XArmDeviceError(cls._format_connect_failure(ip=ip, exc=exc)) from exc
+        finally:
+            if sdk_logger is not None and sdk_logger_level is not None:
+                sdk_logger.setLevel(sdk_logger_level)
         device = cls(arm)
         device.enable()
+        set_approx = getattr(arm, "set_allow_approx_motion", None)
+        if callable(set_approx):
+            set_approx(True)
+            logger.info("Singularity bypass (approx motion) enabled.")
         return device
 
     def enable(self) -> None:
-        """Enable motion and place the arm in position (mode 0) ready state."""
+        """Clear any lingering error and (re-)enable position-control mode.
+
+        The xArm SDK requires ``clean_error`` before ``motion_enable`` when the
+        arm is in a ControllerError state (codes 22, 24, etc.), otherwise all
+        subsequent commands silently return code 1.
+        """
+        self._arm.clean_error()
         self._arm.motion_enable(enable=True)
         self._arm.set_mode(0)
         self._arm.set_state(state=0)
+
+    @property
+    def error_code(self) -> int:
+        """Return the arm's current error code (0 means no error)."""
+        return int(getattr(self._arm, "error_code", 0))
 
     @property
     def dof(self) -> int:
@@ -143,12 +180,29 @@ class XArmDevice:
             self._check(self._arm.open_lite6_gripper(), "open_lite6_gripper")
         elif action is GripperAction.CLOSE:
             self._check(self._arm.close_lite6_gripper(), "close_lite6_gripper")
+        elif action is GripperAction.STOP:
+            self._check(self._arm.stop_lite6_gripper(), "stop_lite6_gripper")
         elif action is GripperAction.VACUUM_ON:
             self._check(self._arm.set_vacuum_gripper(on=True), "set_vacuum_gripper")
         elif action is GripperAction.VACUUM_OFF:
             self._check(self._arm.set_vacuum_gripper(on=False), "set_vacuum_gripper")
         else:
             raise XArmDeviceError(f"Unsupported gripper action: {action!r}")
+
+    def set_manual_mode(self) -> None:
+        """Switch to manual/teach mode (mode 2) so the operator can move joints by hand."""
+        self._arm.set_mode(2)
+        self._arm.set_state(state=0)
+
+    def set_position_mode(self) -> None:
+        """Switch back to position-control mode (mode 0) from manual/teach mode."""
+        self._arm.set_mode(0)
+        self._arm.set_state(state=0)
+
+    @property
+    def mode(self) -> int:
+        """Return the arm's current mode (0 = position, 2 = manual/teach)."""
+        return int(getattr(self._arm, "mode", 0))
 
     def home(self) -> None:
         """Return the arm to its home/reset pose, blocking until complete."""
@@ -171,6 +225,60 @@ class XArmDevice:
         self._arm.disconnect()
 
     @staticmethod
+    def _preflight_socket(*, ip: str, port: int) -> None:
+        """Fail fast when the controller IP/port is unreachable from this host."""
+        try:
+            with socket.create_connection(
+                (ip, port), timeout=_XARM_CONNECT_PREFLIGHT_TIMEOUT_S
+            ):
+                return
+        except OSError as exc:
+            raise XArmDeviceError(
+                XArmDevice._format_socket_connect_failure(ip=ip, port=port, exc=exc)
+            ) from exc
+
+    @staticmethod
+    def _format_socket_connect_failure(*, ip: str, port: int, exc: OSError) -> str:
+        """Build a focused diagnostic for preflight TCP socket failures."""
+        raw = str(exc).strip() or exc.__class__.__name__
+        err_no = getattr(exc, "errno", None)
+        detail = ""
+        if err_no in {errno.EHOSTUNREACH, errno.ENETUNREACH}:
+            detail = (
+                " Network path to the arm is unreachable from this machine. "
+                "Verify subnet/routing, cable/Wi-Fi, and that the arm controller is powered on."
+            )
+        elif err_no == errno.ECONNREFUSED:
+            detail = (
+                " The arm host is reachable, but TCP control port is refusing connections. "
+                "Verify remote API control is enabled on the arm."
+            )
+        elif err_no == errno.ETIMEDOUT:
+            detail = (
+                " TCP connect timed out. "
+                "Check firewall/network policy and arm controller responsiveness."
+            )
+        return f"Unable to reach xArm at {ip}:{port}: {raw}.{detail}"
+
+    @staticmethod
+    def _format_connect_failure(*, ip: str, exc: Exception) -> str:
+        """Build a concise, user-facing diagnosis for xArm connect failures."""
+        raw = str(exc).strip() or exc.__class__.__name__
+        lowered = raw.lower()
+        details = ""
+        if (
+            "failed to check version" in lowered
+            or "connection reset by peer" in lowered
+            or "xarm is not connected" in lowered
+        ):
+            details = (
+                " The arm closed the TCP control session during version handshake. "
+                "Another client (for example xArm Studio) may already hold the session, "
+                "or the controller is rejecting this SDK connection."
+            )
+        return f"Unable to connect to xArm at {ip}: {raw}.{details}"
+
+    @staticmethod
     def _unwrap(result: object, op: str) -> Sequence[float]:
         """
         Normalize an xArm ``(code, data)`` tuple, validating the return code.
@@ -187,8 +295,13 @@ class XArmDevice:
 
     @staticmethod
     def _check(code: object, op: str) -> None:
-        """Raise :class:`XArmDeviceError` when an xArm return code is non-zero."""
+        """Raise :class:`XArmDeviceError` when an xArm return code is non-zero.
+
+        Some SDK methods (notably ``reset(wait=True)``) return ``None`` on
+        success rather than ``0``.  Treat ``None`` as success so callers
+        do not raise spuriously.
+        """
         if isinstance(code, (tuple, list)):
             code = code[0] if code else None
-        if code != _XARM_CODE_OK:
+        if code is not None and code != _XARM_CODE_OK:
             raise XArmDeviceError(f"xArm {op} failed with code {code!r}")

@@ -43,6 +43,8 @@ logger = logging.getLogger("xarm_controller")
 
 #: FEAGI sensory unit key for joint proprioception feedback.
 _SERVO_SENSORY_UNIT: Final[str] = "Servo"
+#: Minimum interval (seconds) between repeated tick-failure log lines.
+_TICK_ERROR_LOG_INTERVAL_S: Final[float] = 5.0
 
 
 class XArmFeagiController:
@@ -69,7 +71,10 @@ class XArmFeagiController:
         self._motor_speed = motor_speed_deg_s
         self._hardware_lock = threading.Lock()
         self._servos: Dict[int, ServoMotor] = {}
+        self._last_applied_seq: Dict[int, int] = {}
         self._stop = threading.Event()
+        self._tick_fail_count: int = 0
+        self._tick_fail_last_log: float = 0.0
 
     @property
     def hardware_lock(self) -> threading.Lock:
@@ -103,8 +108,23 @@ class XArmFeagiController:
             cycle_start = time.monotonic()
             try:
                 self._tick()
+                if self._tick_fail_count:
+                    logger.info(
+                        "[LOOP] Recovered after %d consecutive tick failures.",
+                        self._tick_fail_count,
+                    )
+                    self._tick_fail_count = 0
             except Exception as exc:  # noqa: BLE001 - loop must survive transient faults
-                logger.error("[LOOP] Tick failed: %s", exc)
+                self._tick_fail_count += 1
+                now = time.monotonic()
+                if now - self._tick_fail_last_log >= _TICK_ERROR_LOG_INTERVAL_S:
+                    logger.error(
+                        "[LOOP] Tick failed (%d times): %s",
+                        self._tick_fail_count,
+                        exc,
+                    )
+                    self._tick_fail_last_log = now
+                    self._tick_fail_count = 0
             elapsed = time.monotonic() - cycle_start
             remaining = self._burst_period_s - elapsed
             if remaining > 0:
@@ -118,7 +138,20 @@ class XArmFeagiController:
         self._stream_proprioception()
 
     def _apply_feagi_targets(self) -> None:
-        """Apply FEAGI joint targets as absolute servo angles (when arm is idle)."""
+        """Apply FEAGI joint targets as absolute servo angles (when arm is idle).
+
+        Only joints whose servo has received a new command since the last applied
+        tick are updated; joints without fresh commands keep their current
+        physical angle, preventing snap-back to the default midpoint.
+        """
+        has_new = False
+        for joint in self._joint_map.joints:
+            servo = self._servos[joint.index]
+            if servo._rx_command_seq != self._last_applied_seq.get(joint.index, 0):
+                has_new = True
+                break
+        if not has_new:
+            return
         with self._hardware_lock:
             if self._device.is_moving():
                 return
@@ -126,8 +159,10 @@ class XArmFeagiController:
             target = list(angles)
             for joint in self._joint_map.joints:
                 servo = self._servos[joint.index]
-                if joint.index < len(target):
+                seq = servo._rx_command_seq
+                if seq != self._last_applied_seq.get(joint.index, 0) and joint.index < len(target):
                     target[joint.index] = servo.get_angle()
+                    self._last_applied_seq[joint.index] = seq
             self._device.set_joint_angles(target, speed=self._motor_speed)
 
     def _stream_proprioception(self) -> None:
