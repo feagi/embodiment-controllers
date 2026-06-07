@@ -1,5 +1,5 @@
 # FEAGI Python SDK (aligned with feagi-python-sdk; ConnectorAgent motor wiring)
-feagi-core>=2.1.40
+feagi-core>=2.1.42
 
 # UFACTORY xArm-Python-SDK (BSD-3-Clause). Import namespace: `xarm.wrapper.XArmAPI`.
 xarm-python-sdk==1.18.4

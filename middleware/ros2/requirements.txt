@@ -1,5 +1,5 @@
 # FEAGI client (aligned with feagi-python-sdk)
-feagi-core>=2.1.40
+feagi-core>=2.1.42
 
 # Vision preprocessing (ros_connector_bridge.py)
 numpy>=1.26.4,<3
