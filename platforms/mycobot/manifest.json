@@ -1,0 +1,155 @@
+{
+  "schema_version": "1.0.0",
+  "bundle": {
+    "id": "mycobot",
+    "version": "0.1.0",
+    "created_at": "2026-07-07T00:00:00Z",
+    "updated_at": "2026-07-07T00:00:00Z",
+    "build_number": 1,
+    "checksum": ""
+  },
+  "controller": {
+    "name": "Elephant Robotics MyCobot Platform",
+    "description": "MyCobot 280 (6-DOF) controller bridging arm joints to FEAGI servo motor/proprioception via the feagi-core SDK over USB serial.",
+    "long_description_file": "README.md",
+    "author": {
+      "name": "Neuraville Inc.",
+      "email": "support@neuraville.com",
+      "url": "https://neuraville.com"
+    },
+    "category": "platform",
+    "subcategory": "elephant_robotics",
+    "tags": ["mycobot", "elephant-robotics", "mycobot-280", "robot-arm", "manipulator", "servo"],
+    "license": "Apache-2.0"
+  },
+  "source": {
+    "repository": "https://github.com/feagi/nrs-embodiments",
+    "path": "controllers/platforms/mycobot",
+    "commit": "",
+    "branch": "main",
+    "last_synced": "2026-07-07T00:00:00Z"
+  },
+  "requirements": {
+    "feagi_core": {
+      "min_version": "2.1.42",
+      "max_version": null,
+      "tested_with": "2.1.42"
+    },
+    "python": {
+      "min_version": "3.10.0",
+      "max_version": "3.13.0",
+      "tested_with": "3.10.15"
+    },
+    "platform": {
+      "supported": ["windows", "macos", "linux"],
+      "tested": ["macos", "linux"]
+    },
+    "external": null,
+    "hardware": {
+      "cpu_cores": 2,
+      "ram_mb": 2048,
+      "disk_mb": 200,
+      "gpu": false
+    },
+    "dependencies": {
+      "system": [],
+      "python": [
+        "feagi-core>=2.1.42",
+        "pymycobot==3.0.6"
+      ]
+    }
+  },
+  "capabilities": {
+    "sensors": {
+      "proprioception": {
+        "count": 6,
+        "description": "Joint angles streamed as a Servo proprioception cortical area (MyCobot 280: 6 joints)"
+      }
+    },
+    "actuators": {
+      "servo": {
+        "count": 6,
+        "description": "Positional servo per joint driven by FEAGI motor commands (MyCobot 280: 6 joints)"
+      }
+    }
+  },
+  "media": {
+    "thumbnail": {
+      "url": "",
+      "checksum": ""
+    },
+    "hero": {
+      "url": "",
+      "checksum": ""
+    },
+    "demo_video": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "demo_gif": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "screenshots": []
+  },
+  "examples": [
+    {
+      "id": "mycobot_280",
+      "name": "MyCobot 280",
+      "description": "6-DOF MyCobot 280 arm mapped to FEAGI servo motor + proprioception",
+      "path": "",
+      "genome": "",
+      "connectome": "",
+      "readme": "",
+      "available": true,
+      "status": "available"
+    }
+  ],
+  "installation": {
+    "type": "python_venv",
+    "entry_point": "controller.py",
+    "install_script": null,
+    "post_install_checks": []
+  },
+  "marketplace": {
+    "status": "active",
+    "featured": false,
+    "price": {
+      "amount": 0,
+      "currency": "USD",
+      "model": "free"
+    },
+    "stats": {
+      "downloads": 0,
+      "rating": 0.0,
+      "rating_count": 0,
+      "views": 0
+    },
+    "visibility": "public",
+    "review": {
+      "status": "approved",
+      "reviewed_by": "system",
+      "reviewed_at": "2026-07-07T00:00:00Z",
+      "notes": "MyCobot platform controller for desktop install from Composer"
+    }
+  },
+  "support": {
+    "documentation": "https://docs.feagi.org",
+    "issues": "https://github.com/feagi/nrs-embodiments/issues",
+    "discord": "https://discord.gg/feagi",
+    "email": "support@neuraville.com"
+  },
+  "changelog": [
+    {
+      "version": "0.1.0",
+      "date": "2026-07-07",
+      "changes": [
+        "Initial MyCobot 280 platform controller bundle",
+        "FEAGI servo motor + proprioception bridging via feagi-core SDK",
+        "pymycobot serial adapter (degrees), replacing the legacy feagi_connector/ROS controller"
+      ]
+    }
+  ]
+}

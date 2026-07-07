@@ -3,13 +3,15 @@
     "version": "v0.0.0",
     "feagi_settings": {
         "feagi_url": "http://127.0.0.1",
-        "feagi_api_port": 8000,
-        "magic_link": "null"
-  },
+        "feagi_api_port": "8000",
+        "magic_link": "null",
+        "feagi_host": "127.0.0.1"
+    },
     "agent_settings": {
         "agent_data_port": 10001,
         "agent_id": "mycobot_arm",
         "agent_type": "embodiment",
-        "compression": true
+        "compression": true,
+        "usb_port": "/dev/cu.usbserial-023EDC85"
     }
 }

@@ -1,0 +1,12 @@
+{
+  "_comment": "MyCobot 280 map that EXCLUDES joint 2 (physical index 1) for arms with a dead servo 2. 'index' is the physical joint (0-indexed, so send_angle uses index+1); motor_channel/feedback_channel are the contiguous FEAGI channels 0..4. Ranges are the MyCobot 280 per-joint limits (degrees).",
+  "proprioception_group": 0,
+  "z_neuron_resolution": 20,
+  "joints": [
+    { "index": 0, "motor_group": 0, "motor_channel": 0, "range_min_deg": -168.0, "range_max_deg": 168.0, "feedback_channel": 0 },
+    { "index": 2, "motor_group": 0, "motor_channel": 1, "range_min_deg": -150.0, "range_max_deg": 150.0, "feedback_channel": 1 },
+    { "index": 3, "motor_group": 0, "motor_channel": 2, "range_min_deg": -145.0, "range_max_deg": 145.0, "feedback_channel": 2 },
+    { "index": 4, "motor_group": 0, "motor_channel": 3, "range_min_deg": -165.0, "range_max_deg": 165.0, "feedback_channel": 3 },
+    { "index": 5, "motor_group": 0, "motor_channel": 4, "range_min_deg": -180.0, "range_max_deg": 180.0, "feedback_channel": 4 }
+  ]
+}

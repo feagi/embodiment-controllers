@@ -1,77 +1,67 @@
-# Quick start using feagi_connector
-1) `git clone https://github.com/feagi/feagi.git`
-2) `cd feagi/docker`
-3) `docker compose -f feagi.yml build`
-4) Wait until #3 step is complete.
-5) `docker compose -f feagi.yml up`
-6) load it in your preferred browser: `http://localhost:3000/genome/mode`
-7) Click `Sample Genomes`
-8) See Gazebo and brain activity loaded. Feel free to play with your robot!
+# feagi_connector_mycobot
 
-Any issue? Needs detailed documentation about docker? [Deployment documentation](https://github.com/feagi/feagi/wiki/Deployment)
+Connect an [Elephant Robotics MyCobot](https://www.elephantrobotics.com/en/mycobot-en/)
+6-DOF robotic arm to FEAGI. FEAGI drives each joint as a positional servo and reads the
+joint encoders back as proprioception, so a genome can both move and feel the arm.
 
+The arm is controlled over USB serial through [`pymycobot`](https://pypi.org/project/pymycobot/) —
+no ROS install is required. Works on Windows, macOS, and Linux.
 
-# Where is feagi_connector? 
-`feagi_connector` allows you to integrate with our FEAGI with your preferred robots. 
-`feagi_connector` has been tested on <i>freenove_smart_car, Gazebo, Godot, Tello, and Psychopy.</i> 
-You can use it on your computer or docker.
+# Requirements
 
-# What is inside feagi_connector?
-There are two large library: feagi_interface and retina. `feagi_interface.py` handles the bridge between your project and FEAGI. It allows FEAGI to communicate/controls your robot.
-`retina.py` is the vision where it can see things through any type of camera. 
+- An Elephant Robotics MyCobot (e.g. MyCobot 280) connected over USB.
+- Python 3.6+.
+- `feagi-connector` and `pymycobot` (installed automatically on first run, or via
+  `pip install feagi_connector_mycobot`).
 
-# configuration.json is REQUIRED
-You will need to have your own configuration where you can adjust setting to see the different results. If you don't have one, use the template below:
+# Install
+
 ```
-app_name = 'embodiment'
-
-network_settings = {
-    "feagi_host": "feagi",
-    "feagi_api_port": "8000",
-    'TTL': 2,
-    'last_message': 0,
-}
-
-capabilities = {
-    "vision": {
-        "type": "ipu",
-        "disabled": False,
-        "count": 1,
-        "width": 8,
-        "height": 8,
-        "deviation_threshold": 0.05,
-        "retina_width_percent": 60,
-        "retina_height_percent": 40,
-        "central_vision_compression": [64, 64],
-        "peripheral_vision_compression": [8, 8],
-        "previous_data": {}
-    }
-}
-
-message_to_feagi = {"data": {}}
+pip3 install feagi_connector_mycobot
 ```
 
+# Run
 
-See examples here:
+Plug in the arm, then start the controller. FEAGI auto-detects the serial port; if you
+have multiple serial devices, pass the port explicitly with `--usb_address`.
 
-[Tello's configuration](https://github.com/feagi/feagi/tree/feature-refactor-vision/third_party/physical_robots/tello)
+**Neurorobotics Studio (cloud):**
+```
+python3 -m feagi_connector_mycobot --magic_link "<paste your magic link here>"
+```
 
-[Freenove_smart_car](https://github.com/feagi/feagi/tree/feature-refactor-vision/third_party/physical_robots/freenove/smart_car)
+**Local FEAGI / Docker:**
+```
+python3 -m feagi_connector_mycobot --ip <feagi_ip> --port <feagi_zmq_port>
+```
 
-[Gazebo](https://github.com/feagi/feagi/tree/feature-refactor-vision/third_party/gazebo/simulation/src)
+On Windows use `python` instead of `python3`.
 
-# Where is feagi_connector being used?
-It is being used in python code.
+# Flags
 
-Just install through pip.
+| Flag | Description |
+|------|-------------|
+| `--magic_link` | Magic link from the Neurorobotics Studio Embodiment tab. |
+| `--ip` | FEAGI host IP (local/Docker). |
+| `--port` | FEAGI ZMQ port (`30000` for Docker, `3000` for localhost). |
+| `--usb_address` | Serial port of the arm, e.g. `/dev/ttyUSB0`, `/dev/cu.usbserial-XXXX`, or `COM3`. |
 
-Windows:
-`pip install feagi-connector`  
+# Finding your USB port
 
-Linux/Mac:
-`pip3 install feagi-connector`
+- **Linux:** `ls /dev/ttyUSB*` (or `ls /dev/ttyACM*`).
+- **macOS:** `ls /dev/cu.usbserial*`.
+- **Windows:** check the port name (e.g. `COM3`) in Device Manager.
 
-and after that, you can just use `from feagi-connector import feagi_interface`
+FEAGI will list the detected ports on startup if you do not pass `--usb_address`.
 
-See examples:
-[Tellos' code](https://github.com/feagi/feagi/blob/feature-refactor-vision/third_party/physical_robots/tello/tello.py#L6)
+# Capabilities
+
+- **Output — servo (6):** each FEAGI motor command sets a joint encoder position.
+- **Input — servo_position (6):** live joint encoder positions stream back to FEAGI.
+
+Edit `capabilities.json` to enable/disable joints or change per-joint min/max/default
+encoder values.
+
+# License
+
+Apache 2.0

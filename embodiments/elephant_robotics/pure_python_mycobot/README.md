@@ -1,8 +1,8 @@
 # Connect with MyCobot
 ### IMPORTANT: Ensure you have already updated based on the MyCobot requirements. Also, make sure that you are already running FEAGI and the Brain Visualizer. If you are using the NRS studio, then don't worry about the previous warning.
 
-1. `git clone https://github.com/feagi/feagi-connector.git`
-2. `cd feagi-connector/embodiments/elephant_robotics/pure_python_mycobot`
+1. `git clone https://github.com/feagi/embodiment-controllers.git`
+2. `cd embodiment-controllers/embodiments/elephant_robotics/pure_python_mycobot`
 3. `python3 -m venv venv`
 4. `source venv/bin/activate`
 5. Find the type of USB MyCobot uses.

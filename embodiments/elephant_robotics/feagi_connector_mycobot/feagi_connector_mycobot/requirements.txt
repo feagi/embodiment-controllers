@@ -1,0 +1,2 @@
+feagi-connector>=0.0.17
+pymycobot==3.0.6

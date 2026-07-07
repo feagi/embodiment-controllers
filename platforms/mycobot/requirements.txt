@@ -1,0 +1,5 @@
+# FEAGI Python SDK (aligned with feagi-python-sdk; ConnectorAgent motor wiring)
+feagi-core>=2.1.42
+
+# Elephant Robotics MyCobot SDK (MIT). Import namespace: `pymycobot.mycobot.MyCobot`.
+pymycobot==3.0.6

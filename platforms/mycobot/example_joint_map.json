@@ -1,0 +1,13 @@
+{
+  "_comment": "Example MyCobot 280 joint map. In production the desktop app generates this and passes it via --joint-map. Ranges are the MyCobot 280 per-joint software limits (degrees).",
+  "proprioception_group": 0,
+  "z_neuron_resolution": 20,
+  "joints": [
+    { "index": 0, "motor_group": 0, "motor_channel": 0, "range_min_deg": -168.0, "range_max_deg": 168.0, "feedback_channel": 0 },
+    { "index": 1, "motor_group": 0, "motor_channel": 1, "range_min_deg": -135.0, "range_max_deg": 135.0, "feedback_channel": 1 },
+    { "index": 2, "motor_group": 0, "motor_channel": 2, "range_min_deg": -150.0, "range_max_deg": 150.0, "feedback_channel": 2 },
+    { "index": 3, "motor_group": 0, "motor_channel": 3, "range_min_deg": -145.0, "range_max_deg": 145.0, "feedback_channel": 3 },
+    { "index": 4, "motor_group": 0, "motor_channel": 4, "range_min_deg": -165.0, "range_max_deg": 165.0, "feedback_channel": 4 },
+    { "index": 5, "motor_group": 0, "motor_channel": 5, "range_min_deg": -180.0, "range_max_deg": 180.0, "feedback_channel": 5 }
+  ]
+}
