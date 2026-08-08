@@ -253,10 +253,15 @@ class XArmDevice:
                 " The arm host is reachable, but TCP control port is refusing connections. "
                 "Verify remote API control is enabled on the arm."
             )
-        elif err_no == errno.ETIMEDOUT:
+        elif (
+            err_no == errno.ETIMEDOUT
+            or isinstance(exc, TimeoutError)
+            or "timed out" in raw.lower()
+        ):
             detail = (
                 " TCP connect timed out. "
-                "Check firewall/network policy and arm controller responsiveness."
+                "Verify the arm IP, that the controller is powered on, "
+                "and that this machine can reach it on the control port."
             )
         return f"Unable to reach xArm at {ip}:{port}: {raw}.{detail}"
 

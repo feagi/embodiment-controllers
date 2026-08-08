@@ -33,7 +33,7 @@ from feagi.pns.outputs import ServoMotor
 from arbitration import ControlArbiter
 from control_server import ControlServer, ControlService
 from joint_map import JointMap, load_joint_map, normalize_angle_to_unit
-from xarm_device import XArmDevice
+from xarm_device import XArmDevice, XArmDeviceError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -272,7 +272,12 @@ def main() -> int:
     logger.info("[FEAGI] %s:%s", args.ip, args.port)
     logger.info("[XARM] %s", args.xarm_ip)
 
-    device = XArmDevice.connect(args.xarm_ip)
+    try:
+        device = XArmDevice.connect(args.xarm_ip)
+    except XArmDeviceError as exc:
+        # Expected hardware/network failures: log the diagnosis only (no traceback).
+        logger.error("[XARM] %s", exc)
+        return 1
     dof = device.dof
     logger.info("[ARM] Discovered %d-DOF arm", dof)
     if len(joint_map.joints) > dof:
@@ -341,4 +346,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except XArmDeviceError as exc:
+        # Safety net for any connect/setup path that escapes main()'s local handler.
+        logger.error("[XARM] %s", exc)
+        raise SystemExit(1) from None

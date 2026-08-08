@@ -30,7 +30,9 @@ from feagi.pns import brain_output
 import inspect
 
 from mcp_introspection import MujocoIntrospectionServer
+from motor_ephemeral_utils import resolve_servo_ctrl_command
 from spatial_pointer_config import SpatialPointerConfig, parse_spatial_pointer_block
+import mujoco_viewer_geometry as viewer_geometry
 
 
 # Standard logger (keeps controller compatible with released feagi SDK wheels)
@@ -3650,13 +3652,16 @@ def _register_spatial_pointer_post_connect(
     Servo OPUs must connect first. If FEAGI cannot auto-create the pointer
     cortical area, this raises and the caller keeps servo control active.
     """
+    pointer_channel_count = (
+        max(pointer_cfg.x_channel, pointer_cfg.y_channel, pointer_cfg.z_channel) + 1
+    )
     brain_output.register_motor_spatial_pointer(
         group=pointer_cfg.group,
         width=pointer_cfg.width,
         height=pointer_cfg.height,
         depth=pointer_cfg.depth,
         encoding=pointer_cfg.mode,
-        number_channels=1,
+        number_channels=pointer_channel_count,
         window_ms=pointer_cfg.window_ms,
         max_axis_velocity=pointer_cfg.max_axis_velocity,
     )
@@ -4916,13 +4921,20 @@ def main():
     # Launch MuJoCo viewer
     logger.info("\n[VIEW] Launching MuJoCo viewer...")
     
-    with mujoco.viewer.launch_passive(model, data) as viewer:
+    with mujoco.viewer.launch_passive(
+        model,
+        data,
+        show_left_ui=False,
+        show_right_ui=False,
+    ) as viewer:
         
         # Reset to initial pose
         _reset_mujoco_model_state(model, data)
 
         logger.info("[OK] Viewer running!")
         logger.info("   Press ESC in the viewer window to exit")
+        viewer_geometry.apply_initial_geometry(viewer)
+        geometry_recorder = viewer_geometry.ViewerGeometryRecorder(interval_s=2.0)
         logger.info("   You can manually move joints with the mouse")
         if feagi_enabled:
             if sensors_only_feagi:
@@ -5172,27 +5184,42 @@ def main():
                         if isinstance(motor, ServoMotor):
                             center = (min_val + max_val) / 2.0
                             half_range = (max_val - min_val) / 2.0
-                            # ServoMotor decodes a position in [0, 1] (the Rust
-                            # decoder integrates incremental motion into the same
-                            # 0..1 position), mapped linearly into the joint range.
-                            if snap_value is not None:
-                                pos01 = _clamp(float(snap_value), 0.0, 1.0)
-                                angle = min_val + (max_val - min_val) * pos01
-                            else:
-                                angle = center
+                            # Fresh decode → command; otherwise hold current pose
+                            # until the next FEAGI absolute/incremental update.
+                            joint_id = int(model.actuator_trnid[actuator_idx, 0])
+                            qpos_addr = (
+                                int(model.jnt_qposadr[joint_id]) if joint_id >= 0 else -1
+                            )
+                            current_qpos: Optional[float] = None
+                            if qpos_addr >= 0 and qpos_addr < len(data.qpos):
+                                current_qpos = float(data.qpos[qpos_addr])
+                            angle, servo_apply_mode = resolve_servo_ctrl_command(
+                                snap_value=(
+                                    float(snap_value) if snap_value is not None else None
+                                ),
+                                current_qpos=current_qpos,
+                                min_val=float(min_val),
+                                max_val=float(max_val),
+                            )
                             if half_range > 0:
                                 norm_cmd = _clamp(
                                     (angle - center) / half_range,
                                     -1.0,
                                     1.0,
                                 )
-                            # Apply gain in controller (SDK version compatibility:
-                            # ServoMotor.register may not support gain)
-                            if args.motor_gain != 1.0:
+                            # Apply gain only to fresh commands (not hold-pose).
+                            if (
+                                servo_apply_mode == "command"
+                                and args.motor_gain != 1.0
+                            ):
                                 angle = center + ((angle - center) * args.motor_gain)
                                 angle = max(min_val, min(max_val, angle))
 
-                            rx_mode = snap_mode
+                            rx_mode = (
+                                snap_mode
+                                if servo_apply_mode == "command"
+                                else "hold_pose"
+                            )
                             rx_seq = getattr(motor, "_rx_command_seq", None)
                             data.ctrl[actuator_idx] = angle
                             applied_ctrl = angle
@@ -5231,7 +5258,12 @@ def main():
                         rx_seq_for_state = getattr(motor, "_rx_command_seq", None)
                         if isinstance(rx_seq_for_state, int):
                             state["last_rx_seq"] = float(rx_seq_for_state)
-                        was_changed = (
+                        # Hold-pose ticks intentionally rewrite ctrl=qpos every
+                        # frame; do not treat that as a command edge.
+                        hold_pose_tick = (
+                            isinstance(motor, ServoMotor) and rx_mode == "hold_pose"
+                        )
+                        was_changed = (not hold_pose_tick) and (
                             abs(norm_cmd - prev_norm_cmd) > 1e-6
                             or abs(applied_ctrl - prev_applied_ctrl) > 1e-6
                         )
@@ -5737,6 +5769,7 @@ def main():
 
             # Sync viewer
             viewer.sync()
+            geometry_recorder.tick(viewer)
 
             # Maintain simulation speed
             elapsed = time.time() - step_start
@@ -5748,6 +5781,7 @@ def main():
             frame_number += 1
 
         logger.info("\n[STOP] Simulation ended")
+        geometry_recorder.flush(viewer)
         logger.info(f"   Total frames: {frame_number}")
         logger.info(f"   Total time: {time.time() - start_time:.1f}s")
 

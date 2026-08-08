@@ -314,6 +314,16 @@ def test_device_socket_connect_failure_message_no_route() -> None:
     assert "Network path to the arm is unreachable" in msg
 
 
+def test_device_format_socket_timeout_includes_guidance() -> None:
+    msg = XArmDevice._format_socket_connect_failure(
+        ip="192.168.1.220",
+        port=502,
+        exc=TimeoutError("timed out"),
+    )
+    assert "Unable to reach xArm at 192.168.1.220:502" in msg
+    assert "TCP connect timed out" in msg
+
+
 def test_device_preflight_socket_raises_xarm_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def _raise_no_route(*_args: object, **_kwargs: object) -> object:
         raise OSError(65, "No route to host")
