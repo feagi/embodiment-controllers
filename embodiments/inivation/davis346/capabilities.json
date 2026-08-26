@@ -1,0 +1,15 @@
+{
+  "_notes": "The target simple-vision cortical area is identified by cortical_group_id alone: the controller derives its cortical ID and creates it (or resizes it if it already exists at the wrong size) automatically on startup via FEAGI's REST API. coordinates_3d only matters the first time the area is created. Every field here can still be overridden per-run with a matching --flag.",
+  "vision": {
+    "cortical_group_id": 0,
+    "coordinates_3d": [-100, 30, 0],
+    "event_potential": 200.0
+  },
+  "camera": {
+    "camera_serial": null
+  },
+  "playback": {
+    "aedat_path": "",
+    "loop": false
+  }
+}

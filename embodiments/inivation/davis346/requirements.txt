@@ -1,0 +1,13 @@
+# FEAGI Python SDK (Apache-2.0). Provides feagi.pns.client.FeagiAgentClient
+# and the feagi_rust_py_libs data layer used to build XYZP byte containers.
+feagi>=2.1.42
+
+# Live DAVIS346 USB capture (MIT). Implements the DAVIS346 USB protocol
+# directly in Rust; transitively links libusb (LGPL-2.1) via rusb, which is
+# acceptable for this open-source, Apache-2.0 licensed controller.
+neuromorphic_drivers>=0.17.0
+
+# AEDAT4 file playback (MIT). Pure file decoder, no USB dependency.
+aedat>=2.0.0
+
+numpy>=1.24

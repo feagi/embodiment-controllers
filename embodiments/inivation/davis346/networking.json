@@ -1,0 +1,21 @@
+{
+  "_notes": "Edit this once for your FEAGI instance. Every field here can still be overridden per-run with a matching --flag. auth_token_b64 must be a real 32-byte base64 token if your FEAGI instance enforces one.",
+  "feagi_settings": {
+    "feagi_host": "127.0.0.1",
+    "feagi_api_port": 8000,
+    "feagi_registration_port": 30001,
+    "feagi_sensory_port": 5558,
+    "feagi_motor_port": 5564,
+    "feagi_http_timeout_s": 5.0,
+    "heartbeat_interval_s": 5.0,
+    "connection_timeout_ms": 5000,
+    "registration_retries": 3
+  },
+  "agent_settings": {
+    "agent_id": "davis346_event_camera",
+    "agent_descriptor_manufacturer": "Neuraville",
+    "agent_descriptor_name": "DAVIS346",
+    "agent_descriptor_version": 1,
+    "auth_token_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  }
+}

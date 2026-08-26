@@ -1,0 +1,139 @@
+{
+  "schema_version": "1.0.0",
+  "bundle": {
+    "id": "inivation-davis346",
+    "version": "0.1.0",
+    "created_at": "2026-08-25T00:00:00Z",
+    "updated_at": "2026-08-25T00:00:00Z",
+    "build_number": 1,
+    "checksum": ""
+  },
+  "controller": {
+    "name": "iniVation DAVIS346 Event Camera",
+    "description": "Streams DAVIS346 event-camera output into a FEAGI simple-vision cortical area as XYZP voxels, from live USB capture or AEDAT4 file playback.",
+    "long_description_file": "README.md",
+    "author": {
+      "name": "Neuraville Inc.",
+      "email": "support@neuraville.com",
+      "url": "https://neuraville.com"
+    },
+    "category": "embodiment",
+    "subcategory": "inivation",
+    "tags": ["davis346", "inivation", "event-camera", "dvs", "neuromorphic", "vision", "aedat4"],
+    "license": "Apache-2.0"
+  },
+  "source": {
+    "repository": "https://github.com/feagi/embodiment-controllers",
+    "path": "embodiments/inivation/davis346",
+    "commit": "",
+    "branch": "main",
+    "last_synced": "2026-08-25T00:00:00Z"
+  },
+  "requirements": {
+    "feagi_core": {
+      "min_version": "2.1.42",
+      "max_version": null,
+      "tested_with": "2.1.42"
+    },
+    "python": {
+      "min_version": "3.10.0",
+      "max_version": "3.13.0",
+      "tested_with": "3.12"
+    },
+    "platform": {
+      "supported": ["windows", "macos", "linux"],
+      "tested": ["macos"]
+    },
+    "external": "iniVation DAVIS346 event camera (for live capture) or a recorded .aedat4 file (for playback)",
+    "hardware": {
+      "cpu_cores": 1,
+      "ram_mb": 512,
+      "disk_mb": 100,
+      "gpu": false
+    },
+    "dependencies": {
+      "system": [],
+      "python": [
+        "feagi>=2.1.42",
+        "neuromorphic_drivers>=0.17.0",
+        "aedat>=2.0.0"
+      ]
+    }
+  },
+  "capabilities": {
+    "sensors": {
+      "vision": {
+        "count": 1,
+        "description": "DAVIS346 polarity events (346x260) injected as XYZP voxels into a simple-vision cortical area; Z axis encodes ON/OFF polarity."
+      }
+    },
+    "actuators": {}
+  },
+  "media": {
+    "thumbnail": { "url": "", "checksum": "" },
+    "hero": { "url": "", "checksum": "" },
+    "demo_video": { "url": "", "duration_seconds": 0, "checksum": "" },
+    "demo_gif": { "url": "", "duration_seconds": 0, "checksum": "" },
+    "screenshots": []
+  },
+  "examples": [
+    {
+      "id": "live-capture",
+      "name": "Live DAVIS346 USB capture",
+      "description": "Stream events directly from a connected DAVIS346 camera",
+      "path": "",
+      "genome": "",
+      "connectome": "",
+      "readme": "",
+      "available": true,
+      "status": "available"
+    },
+    {
+      "id": "aedat4-playback",
+      "name": "AEDAT4 file playback",
+      "description": "Replay a recorded .aedat4 event stream at its original timing",
+      "path": "",
+      "genome": "",
+      "connectome": "",
+      "readme": "",
+      "available": true,
+      "status": "available"
+    }
+  ],
+  "installation": {
+    "type": "python_venv",
+    "entry_point": "controller.py",
+    "install_script": null,
+    "post_install_checks": []
+  },
+  "marketplace": {
+    "status": "active",
+    "featured": false,
+    "price": { "amount": 0, "currency": "USD", "model": "free" },
+    "stats": { "downloads": 0, "rating": 0.0, "rating_count": 0, "views": 0 },
+    "visibility": "public",
+    "review": {
+      "status": "pending",
+      "reviewed_by": "",
+      "reviewed_at": "",
+      "notes": ""
+    }
+  },
+  "support": {
+    "documentation": "https://docs.feagi.org",
+    "issues": "https://github.com/feagi/embodiment-controllers/issues",
+    "discord": "https://discord.gg/feagi",
+    "email": "support@neuraville.com"
+  },
+  "changelog": [
+    {
+      "version": "0.1.0",
+      "date": "2026-08-25",
+      "changes": [
+        "Initial DAVIS346 controller: live USB capture and AEDAT4 file playback",
+        "XYZP voxel mapping with top-left to bottom-left Y-axis conversion",
+        "Permissively licensed dependencies only (MIT / Apache-2.0, LGPL-2.1 via libusb)"
+      ]
+    }
+  ]
+}
