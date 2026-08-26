@@ -21,7 +21,7 @@ from typing import Any, List, Sequence
 logger = logging.getLogger(__name__)
 
 # feagi-structures: 4-char cortical_type_key for the simple-vision sensory unit.
-_ISVI_CORTICAL_TYPE_KEY = "isvi"
+_ISVI_CORTICAL_TYPE_KEY = "iimg"
 
 # feagi-structures IOCorticalAreaConfigurationFlag: variant 9 = CartesianPlane,
 # frame-change bit 0 = Absolute. This is the framing FEAGI's default genome
