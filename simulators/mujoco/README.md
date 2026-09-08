@@ -118,7 +118,7 @@ Use Python 3.10, 3.11, or 3.12 (not 3.13+). MuJoCo 3.2.3 has no pre-built wheels
 FEAGI must have a genome loaded and `auto_create_missing_cortical_areas = true` in its config. Try:
 1. `--load-genome` to load essential genome before connecting
 2. Increase retries: `--feagi-zmq-registration-retries 10 --feagi-zmq-heartbeat-interval-s 5.0`
-3. Ensure FEAGI was started with a genome (e.g. `--genome path/to/genome.json`) or load one via its API first
+3. Ensure FEAGI was started with a genome (e.g. `--genome path/to/brain.genome`) or load one via its API first
 
 ## Subfolders
 
