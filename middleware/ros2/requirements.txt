@@ -1,5 +1,5 @@
 # FEAGI client (aligned with feagi-python-sdk)
-feagi-core>=2.1.42
+feagi-core>=2.1.52
 
 # Vision preprocessing (ros_connector_bridge.py)
 numpy>=1.26.4,<3
@@ -8,7 +8,7 @@ numpy>=1.26.4,<3
 # `ros2` CLI (same discovery as Topic scan / settings / FEAGI_ROS2) and configures PYTHONPATH and
 # the interpreter beside that `ros2`. Optional overrides: FEAGI_ROS_PYTHON, sourced shell env.
 
-# FEAGI PyO3 bindings (health monitor / PNS). Composer venv installs this for the bundled-Python layout.
-# When the connector runs your ROS interpreter, Studio pip-installs into that env on first Start
-# unless FEAGI_ROS_CONNECTOR_SKIP_AUTOPPIP=1.
-feagi-rust-py-libs>=0.0.102
+# ROS-only: bridge runs in the ROS distro Python, not the controller venv. Studio autopip installs
+# feagi-rust-py-libs into that interpreter (feagi-core above is for Composer venv / manifest parity).
+# Other controllers should pin feagi-core only (rust-py-libs is a transitive SDK dependency).
+feagi-rust-py-libs>=0.0.111

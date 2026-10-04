@@ -163,7 +163,7 @@ impl<'a, D> LedDisplay<'a, D> {
     /// Update LEDs based on neuron firing coordinates from cortical area
     /// 
     /// **FEAGI Cortical Area Standard:**
-    /// - Type: `omis` (Miscellaneous Motor)
+    /// - Type: `omis` (Miscellaneous Output)
     /// - Name: "LED Matrix" or "Display Matrix"
     /// - Dimensions: 5×5×1
     /// 

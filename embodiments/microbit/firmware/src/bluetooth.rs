@@ -173,7 +173,7 @@ impl BluetoothService {
     /// Receive neuron firing data from FEAGI
     /// 
     /// **Expected Cortical Area:**
-    /// - Type: `omis` (Miscellaneous Motor)
+    /// - Type: `omis` (Miscellaneous Output)
     /// - Name: "LED Matrix" or "Display Matrix"
     /// - Dimensions: 5×5×1
     /// 

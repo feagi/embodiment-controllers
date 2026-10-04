@@ -17,6 +17,7 @@ import ctypes.util
 import json
 import logging
 import os
+import platform
 import sys
 import threading
 import time
@@ -92,6 +93,47 @@ class _NSRect(ctypes.Structure):
                 ("width", ctypes.c_double), ("height", ctypes.c_double)]
 
 
+# Intel macOS returns structures that do not fit in two registers through
+# objc_msgSend_stret. NSRect is 32 bytes. Calling objc_msgSend for that
+# return shifts the receiver and aborts with "Attempt to use unknown class".
+# arm64 has no stret entry point; objc_msgSend is the correct symbol there.
+_X86_64_REGISTER_STRUCT_RETURN_BYTES = 16
+
+
+def _uses_objc_msg_send_stret(restype: Any) -> bool:
+    """Return True when this result must be sent via objc_msgSend_stret.
+
+    Only x86_64 macOS uses a separate stret symbol, and only for structure
+    results larger than two general/SSE registers (16 bytes).
+    """
+    if sys.platform != "darwin" or platform.machine() != "x86_64":
+        return False
+    if not isinstance(restype, type) or not issubclass(restype, ctypes.Structure):
+        return False
+    return ctypes.sizeof(restype) > _X86_64_REGISTER_STRUCT_RETURN_BYTES
+
+
+def _objc_msg_symbol(libobjc: Any, restype: Any) -> Any:
+    """Pick objc_msgSend or objc_msgSend_stret for this return type."""
+    if _uses_objc_msg_send_stret(restype):
+        return libobjc.objc_msgSend_stret
+    return libobjc.objc_msgSend
+
+
+def _objc_msg(libobjc: Any, restype: Any, argtypes: tuple[Any, ...], *args: Any) -> Any:
+    """Call one Objective-C method with a fresh, ABI-correct prototype.
+
+    A new prototype is built per call so restype/argtypes are not mutated on
+    the shared libobjc function pointer.
+    """
+    symbol = _objc_msg_symbol(libobjc, restype)
+    address = ctypes.cast(symbol, ctypes.c_void_p).value
+    if address is None:
+        raise OSError("Objective-C message-send symbol address is null")
+    function = ctypes.CFUNCTYPE(restype, *argtypes)(address)
+    return function(*args)
+
+
 def _macos_objc_setup():
     """Return configured libobjc, or None on failure."""
     try:
@@ -110,19 +152,30 @@ def _macos_get_screen_height(libobjc) -> Optional[float]:
     global coordinate systems are both anchored to the primary screen.
     """
     try:
-        send = libobjc.objc_msgSend
-        send.restype = ctypes.c_void_p
-        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        
+        id_args = (ctypes.c_void_p, ctypes.c_void_p)
         NSScreen = libobjc.objc_getClass(b"NSScreen")
-        screens = send(NSScreen, libobjc.sel_registerName(b"screens"))
-        
-        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
-        primary_screen = send(screens, libobjc.sel_registerName(b"objectAtIndex:"), ctypes.c_ulong(0))
-
-        send.restype = _NSRect
-        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        rect = send(primary_screen, libobjc.sel_registerName(b"frame"))
+        screens = _objc_msg(
+            libobjc,
+            ctypes.c_void_p,
+            id_args,
+            NSScreen,
+            libobjc.sel_registerName(b"screens"),
+        )
+        primary_screen = _objc_msg(
+            libobjc,
+            ctypes.c_void_p,
+            (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong),
+            screens,
+            libobjc.sel_registerName(b"objectAtIndex:"),
+            ctypes.c_ulong(0),
+        )
+        rect = _objc_msg(
+            libobjc,
+            _NSRect,
+            id_args,
+            primary_screen,
+            libobjc.sel_registerName(b"frame"),
+        )
         return float(rect.height)
     except Exception:
         return None
@@ -131,20 +184,31 @@ def _macos_get_screen_height(libobjc) -> Optional[float]:
 def _macos_get_window(libobjc) -> Optional[int]:
     """Return the largest NSWindow owned by this process."""
     try:
-        send = libobjc.objc_msgSend
-
+        id_args = (ctypes.c_void_p, ctypes.c_void_p)
         # [NSApplication sharedApplication]
-        send.restype = ctypes.c_void_p
-        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         NSApp = libobjc.objc_getClass(b"NSApplication")
-        app = send(NSApp, libobjc.sel_registerName(b"sharedApplication"))
-
+        app = _objc_msg(
+            libobjc,
+            ctypes.c_void_p,
+            id_args,
+            NSApp,
+            libobjc.sel_registerName(b"sharedApplication"),
+        )
         # [app windows]
-        windows = send(app, libobjc.sel_registerName(b"windows"))
-
-        # count
-        send.restype = ctypes.c_ulong
-        count = send(windows, libobjc.sel_registerName(b"count"))
+        windows = _objc_msg(
+            libobjc,
+            ctypes.c_void_p,
+            id_args,
+            app,
+            libobjc.sel_registerName(b"windows"),
+        )
+        count = _objc_msg(
+            libobjc,
+            ctypes.c_ulong,
+            id_args,
+            windows,
+            libobjc.sel_registerName(b"count"),
+        )
         if not count:
             return None
 
@@ -154,15 +218,18 @@ def _macos_get_window(libobjc) -> Optional[int]:
         sel_frame = libobjc.sel_registerName(b"frame")
 
         for i in range(count):
-            send.restype = ctypes.c_void_p
-            send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
-            win = send(windows, sel_obj, ctypes.c_ulong(i))
+            win = _objc_msg(
+                libobjc,
+                ctypes.c_void_p,
+                (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong),
+                windows,
+                sel_obj,
+                ctypes.c_ulong(i),
+            )
             if not win:
                 continue
-            send.restype = _NSRect
-            send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            f = send(win, sel_frame)
-            area = int(f.width) * int(f.height)
+            frame = _objc_msg(libobjc, _NSRect, id_args, win, sel_frame)
+            area = int(frame.width) * int(frame.height)
             if area > best_area:
                 best_area = area
                 best_win = win
@@ -192,18 +259,21 @@ def _macos_apply_window_rect(libobjc: Any, x: int, y: int, w: int, h: int) -> bo
     if not win:
         return False
 
-    send = libobjc.objc_msgSend
-
     # Cocoa uses bottom-left origin.
     # FEAGI provides (x, y) as top-left and (w, h) as frame size.
     # The bottom-left Y in Cocoa is screen_h - (y + h).
     cocoa_y = screen_h - float(y) - float(h)
-    
-    send.restype = None
-    send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, _NSRect, ctypes.c_bool]
-    send(win, libobjc.sel_registerName(b"setFrame:display:"),
-         _NSRect(float(x), cocoa_y, float(w), float(h)), True)
-
+    # void return: objc_msgSend on both architectures. The NSRect argument
+    # follows the platform C ABI (hidden pointer on Intel, registers on arm64).
+    _objc_msg(
+        libobjc,
+        None,
+        (ctypes.c_void_p, ctypes.c_void_p, _NSRect, ctypes.c_bool),
+        win,
+        libobjc.sel_registerName(b"setFrame:display:"),
+        _NSRect(float(x), cocoa_y, float(w), float(h)),
+        True,
+    )
     return True
 
 

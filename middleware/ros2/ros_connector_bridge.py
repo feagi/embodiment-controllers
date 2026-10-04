@@ -50,11 +50,72 @@ def _parse_ros_motor_template(
         return ("rotary", "incremental")
     if t == "motor:PositionalServoIncremental":
         return ("servo", "incremental")
+    if t == "motor:AngularPointerIncremental":
+        return ("angular_pointer", "incremental")
     if t == "motor:RotaryMotor":
         return ("rotary", "incremental" if inc_flag else "absolute")
     if t == "motor:PositionalServo":
         return ("servo", "incremental" if inc_flag else "absolute")
+    if t == "motor:AngularPointer":
+        return ("angular_pointer", "incremental" if inc_flag else "absolute")
     return None
+
+
+# Genome AngularPointer template defaults (feagi-structures motor_cortical_units).
+ANGULAR_POINTER_ABSOLUTE_WIDTH = 3
+ANGULAR_POINTER_INCREMENTAL_WIDTH = 6
+ANGULAR_POINTER_HEIGHT = 1
+ANGULAR_POINTER_DEPTH = 10
+ANGULAR_POINTER_WINDOW_MS = 200
+
+
+def ros_message_is_geometry_vector3(ros_message_type: Optional[str]) -> bool:
+    """Return True when the mapping declares geometry_msgs/Vector3."""
+    if ros_message_type is None:
+        return False
+    low = str(ros_message_type).strip().lower()
+    return "geometry_msgs" in low and "vector3" in low and "stamped" not in low
+
+
+def _read_signed_motor_axis(
+    motor_data: Any,
+    group: int,
+    channel: int,
+    mode: str,
+) -> Optional[float]:
+    """Read one signed AngularPointer axis (``[-1, 1]``) from the motor snapshot."""
+    if not isinstance(motor_data, dict):
+        return None
+    value = motor_data.get(f"{group}:{channel}:{mode}")
+    if not isinstance(value, (int, float)):
+        return None
+    return max(-1.0, min(1.0, float(value)))
+
+
+def _angular_pointer_vector3(
+    motor_data: Any,
+    group: int,
+    mode: str,
+) -> Optional[Tuple[float, float, float]]:
+    """Decode AngularPointer snapshot into ``(yaw, pitch, roll)`` signed values.
+
+    Absolute requires all three axes. Incremental publishes when at least one
+    axis is present; silent axes are 0.
+    """
+    yaw = _read_signed_motor_axis(motor_data, group, 0, mode)
+    pitch = _read_signed_motor_axis(motor_data, group, 1, mode)
+    roll = _read_signed_motor_axis(motor_data, group, 2, mode)
+    if mode == "absolute":
+        if yaw is None or pitch is None or roll is None:
+            return None
+        return (yaw, pitch, roll)
+    if yaw is None and pitch is None and roll is None:
+        return None
+    return (
+        0.0 if yaw is None else yaw,
+        0.0 if pitch is None else pitch,
+        0.0 if roll is None else roll,
+    )
 
 
 @dataclass
@@ -481,6 +542,7 @@ def main() -> int:
         from std_msgs.msg import Float64 as FMsg
         from std_msgs.msg import Float64MultiArray as F64MultiMsg
         from geometry_msgs.msg import Twist as TwistMsg
+        from geometry_msgs.msg import Vector3 as Vector3Msg
         from nav_msgs.msg import Odometry as OdometryMsg
         from feagi.pns.outputs import RotaryMotor, ServoMotor
         from feagi.pns import brain_output
@@ -494,7 +556,7 @@ def main() -> int:
             sys.executable,
             e,
             sys.executable,
-            "feagi-rust-py-libs>=0.0.101",
+            "feagi-rust-py-libs>=0.0.111",
         )
         return 2
 
@@ -580,13 +642,14 @@ def main() -> int:
 
     rot_l: List[Tuple[MappingRow, Any]] = []
     servo_l: List[Tuple[MappingRow, Any]] = []
+    angular_l: List[Tuple[MappingRow, str]] = []
     for r in mots:
         parsed = _parse_ros_motor_template(r.feagi_io_template, r.motor_frame_mode)
         if parsed is None:
             logger.error(
                 "Motor mapping %s skipped: feagiIoTemplate=%r is not supported by this "
                 "bridge script. Re-copy ros_connector_bridge.py from the FEAGI repo "
-                "(embodiment-controllers/middleware/ros2/) or re-install the ros2 controller "
+                "(nrs-embodiments/controllers/middleware/ros2/) or re-install the ros2 controller "
                 "from Composer so Incremental/Absolute motor variants match Studio.",
                 r.mapping_id,
                 r.feagi_io_template,
@@ -601,7 +664,7 @@ def main() -> int:
                 channel_index=int(r.channel_id),
             )
             rot_l.append((r, mv))
-        else:
+        elif motor_kind == "servo":
             sv = ServoMotor.register(
                 range=(0.0, 180.0),
                 encoding=enc,
@@ -617,9 +680,19 @@ def main() -> int:
                     sv.incremental_step_ratio,
                 )
             servo_l.append((r, sv))
+        else:
+            if not ros_message_is_geometry_vector3(r.ros_message_type):
+                logger.error(
+                    "motor:AngularPointer mapping %s requires rosMessageType "
+                    "geometry_msgs/msg/Vector3 (got %r).",
+                    r.mapping_id,
+                    r.ros_message_type,
+                )
+                return 1
+            angular_l.append((r, enc))
 
     sensory_parts = bool(vision_units or proximity_bindings or smart_bindings)
-    has_motor_out = bool(rot_l or servo_l)
+    has_motor_out = bool(rot_l or servo_l or angular_l)
 
     if not sensory_parts and not has_motor_out:
         logger.error(
@@ -691,6 +764,38 @@ def main() -> int:
             gid,
             max_ch,
             gmap.get("SmartIMU"),
+        )
+
+    if angular_l and not hasattr(brain_output, "register_motor_angular_pointer"):
+        logger.error(
+            "AngularPointer mappings require a FEAGI Python SDK with "
+            "register_motor_angular_pointer."
+        )
+        return 1
+    for r, enc in angular_l:
+        width = (
+            ANGULAR_POINTER_INCREMENTAL_WIDTH
+            if enc == "incremental"
+            else ANGULAR_POINTER_ABSOLUTE_WIDTH
+        )
+        window_ms = ANGULAR_POINTER_WINDOW_MS if enc == "incremental" else None
+        brain_output.register_motor_angular_pointer(
+            group=int(r.device_group_id),
+            width=width,
+            height=ANGULAR_POINTER_HEIGHT,
+            depth=ANGULAR_POINTER_DEPTH,
+            encoding=enc,
+            number_channels=1,
+            window_ms=window_ms,
+        )
+        logger.info(
+            "[REGISTER] AngularPointer mapping %s group=%s encoding=%s dims=%dx%dx%d",
+            r.mapping_id,
+            r.device_group_id,
+            enc,
+            width,
+            ANGULAR_POINTER_HEIGHT,
+            ANGULAR_POINTER_DEPTH,
         )
 
     logger.info("[CONN] brain_output.connect() (single ZMQ agent + device_registrations)...")
@@ -823,6 +928,22 @@ def main() -> int:
                 topic_s,
                 r.ros_message_type,
             )
+    angular_pubs: List[Tuple[MappingRow, str, Any]] = []
+    for r, enc in angular_l:
+        topic_a = r.ros_topic.strip()
+        angular_pubs.append(
+            (
+                r,
+                enc,
+                node.create_publisher(Vector3Msg, topic_a, 10),
+            )
+        )
+        logger.info(
+            "Motor AngularPointer %s publishes geometry_msgs/msg/Vector3 on %s "
+            "(x=yaw, y=pitch, z=roll signed [-1, 1]).",
+            r.mapping_id,
+            topic_a,
+        )
     if servo_l:
         default_units_effective = (
             "explicit via FEAGI_ROS_SERVO_PUBLISH_UNITS"
@@ -962,6 +1083,20 @@ def main() -> int:
                                 units,
                             )
                         pub.publish(m)
+                motor_snapshot = getattr(brain_output, "_motor_data", {})
+                for r, enc, pub in angular_pubs:
+                    ypr = _angular_pointer_vector3(
+                        motor_snapshot,
+                        int(r.device_group_id),
+                        enc,
+                    )
+                    if ypr is None:
+                        continue
+                    vec = Vector3Msg()
+                    vec.x = float(ypr[0])
+                    vec.y = float(ypr[1])
+                    vec.z = float(ypr[2])
+                    pub.publish(vec)
             time.sleep(0.003)
     except KeyboardInterrupt:
         logger.info("Interrupt.")

@@ -31,9 +31,9 @@
   },
   "requirements": {
     "feagi_core": {
-      "min_version": "2.1.42",
+      "min_version": "2.1.56",
       "max_version": null,
-      "tested_with": "2.1.42"
+      "tested_with": "2.1.56"
     },
     "python": {
       "min_version": "3.10.0",
@@ -54,7 +54,7 @@
     "dependencies": {
       "system": [],
       "python": [
-        "feagi-core>=2.1.42",
+        "feagi-core==2.2.2",
         "xarm-python-sdk==1.18.4"
       ]
     }

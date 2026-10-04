@@ -59,7 +59,7 @@ FEAGI Core
 
 The micro:bit LED matrix is mapped to a FEAGI OPU (Output Processing Unit) cortical area:
 
-- **Cortical Type**: `omis` (Miscellaneous Motor)
+- **Cortical Type**: `omis` (Miscellaneous Output)
 - **Cortical Name**: "LED Matrix" or "Display Matrix"
 - **Dimensions**: 5×5×1 (matches micro:bit LED matrix)
 - **Coordinate Mapping**: Direct 1:1 mapping
@@ -68,7 +68,7 @@ The micro:bit LED matrix is mapped to a FEAGI OPU (Output Processing Unit) corti
 
 **Usage**:
 1. Create a cortical area in FEAGI with:
-   - Type: `omis` (Miscellaneous Motor)
+   - Type: `omis` (Miscellaneous Output)
    - Name: "LED Matrix"
    - Dimensions: 5×5×1
 2. Python agent subscribes to this cortical area

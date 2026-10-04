@@ -137,7 +137,7 @@
 - **License:** TrouBLE is MIT/Apache-2.0 (permissive)
 - **BLE Service:** Nordic UART Service (NUS) for simple serial communication
 - **Protocol:** Custom FEAGI protocol packets over NUS
-- **LED Matrix:** Uses `omis` (Miscellaneous Motor) cortical area, 5x5x1 dimensions
+- **LED Matrix:** Uses `omis` (Miscellaneous Output) cortical area, 5x5x1 dimensions
 - **GPIO:** Maps to standard FEAGI motor cortical areas
 
 

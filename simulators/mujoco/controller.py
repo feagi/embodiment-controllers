@@ -3663,7 +3663,6 @@ def _register_spatial_pointer_post_connect(
         encoding=pointer_cfg.mode,
         number_channels=pointer_channel_count,
         window_ms=pointer_cfg.window_ms,
-        max_axis_velocity=pointer_cfg.max_axis_velocity,
     )
     runtime = _resolve_mujoco_spatial_pointer_runtime(model, name_translator)
     client = getattr(brain_output, "_client", None)
