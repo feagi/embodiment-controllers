@@ -1,0 +1,163 @@
+{
+  "schema_version": "1.0.0",
+  "bundle": {
+    "id": "esp32-led",
+    "version": "0.1.0",
+    "created_at": "2026-11-20T00:00:00Z",
+    "updated_at": "2026-11-20T00:00:00Z",
+    "build_number": 1,
+    "checksum": ""
+  },
+  "controller": {
+    "name": "ESP32 LED",
+    "description": "Drives an LED on an ESP32 from a FEAGI PositionalServo (opse) output area over USB serial, with an Arduino sketch and a self-blinking example genome.",
+    "long_description_file": "README.md",
+    "author": {
+      "name": "Neuraville Inc.",
+      "email": "support@neuraville.com",
+      "url": "https://neuraville.com"
+    },
+    "category": "embodiment",
+    "subcategory": "esp32",
+    "tags": [
+      "esp32",
+      "arduino",
+      "led",
+      "serial",
+      "microcontroller",
+      "beginner"
+    ],
+    "license": "Apache-2.0"
+  },
+  "source": {
+    "repository": "https://github.com/feagi/embodiment-controllers",
+    "path": "embodiments/esp32",
+    "commit": "",
+    "branch": "main",
+    "last_synced": "2026-11-20T00:00:00Z"
+  },
+  "requirements": {
+    "feagi_core": {
+      "min_version": "2.1.43",
+      "max_version": null,
+      "tested_with": "2.1.43"
+    },
+    "python": {
+      "min_version": "3.10.0",
+      "max_version": "3.13.0",
+      "tested_with": "3.12"
+    },
+    "platform": {
+      "supported": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "tested": [
+        "windows"
+      ]
+    },
+    "external": "ESP32 board (e.g. ESP32-WROOM-32 DevKit) flashed with firmware/esp32_led via Arduino IDE or arduino-cli (esp32 core 2.x/3.x); optional LED + 220-330 ohm resistor on GPIO2",
+    "hardware": {
+      "cpu_cores": 1,
+      "ram_mb": 256,
+      "disk_mb": 50,
+      "gpu": false
+    },
+    "dependencies": {
+      "system": [],
+      "python": [
+        "feagi>=2.1.43",
+        "pyserial>=3.5"
+      ]
+    }
+  },
+  "capabilities": {
+    "sensors": {},
+    "actuators": {
+      "led": {
+        "count": 1,
+        "description": "One LED driven by a 1x1x10 opse output area: any firing turns it on, the firing Z level sets brightness (z=0 = 100%), silence turns it off."
+      }
+    }
+  },
+  "media": {
+    "thumbnail": {
+      "url": "",
+      "checksum": ""
+    },
+    "hero": {
+      "url": "",
+      "checksum": ""
+    },
+    "demo_video": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "demo_gif": {
+      "url": "",
+      "duration_seconds": 0,
+      "checksum": ""
+    },
+    "screenshots": []
+  },
+  "examples": [
+    {
+      "id": "self-blink",
+      "name": "Self-blinking LED",
+      "description": "Latch + square-wave oscillator genome with Start/Stop, on/off time and brightness controls in the Brain Visualizer",
+      "path": "",
+      "genome": "genome/esp32_led_blink_genome.json",
+      "connectome": "",
+      "readme": "README.md",
+      "available": true,
+      "status": "available"
+    }
+  ],
+  "installation": {
+    "type": "python_venv",
+    "entry_point": "controller.py",
+    "install_script": null,
+    "post_install_checks": []
+  },
+  "marketplace": {
+    "status": "active",
+    "featured": false,
+    "price": {
+      "amount": 0,
+      "currency": "USD",
+      "model": "free"
+    },
+    "stats": {
+      "downloads": 0,
+      "rating": 0.0,
+      "rating_count": 0,
+      "views": 0
+    },
+    "visibility": "public",
+    "review": {
+      "status": "pending",
+      "reviewed_by": "",
+      "reviewed_at": "",
+      "notes": ""
+    }
+  },
+  "support": {
+    "documentation": "https://docs.feagi.org",
+    "issues": "https://github.com/feagi/embodiment-controllers/issues",
+    "discord": "https://discord.gg/feagi",
+    "email": "support@neuraville.com"
+  },
+  "changelog": [
+    {
+      "version": "0.1.0",
+      "date": "2026-11-20",
+      "changes": [
+        "Replaces the Rust controller-mode firmware with an Arduino sketch + Python controller on the feagi SDK",
+        "Auto-creates the opse LED area and reconnects after genome reloads",
+        "Example self-blinking genome controllable from the Brain Visualizer"
+      ]
+    }
+  ]
+}
