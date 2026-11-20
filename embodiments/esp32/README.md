@@ -73,8 +73,8 @@ overridden with the matching `--flag`; see `python controller.py --help`.
 If the loaded genome doesn't have this area, the controller creates it on startup.
 
 - Any neuron in the column fires → LED on. Which Z level fired sets the brightness: FEAGI's decoder maps
-  **z=0 → 100 %**, and each step up in z is dimmer. The exact scale depends on the FEAGI version: z=9 is about 10 % on
-  FEAGI 2.1.43 and about 53 % on Neurorobotics Studio's bundled FEAGI.
+  **z=0 → 100 %**, and each step up in z is dimmer. The exact scale depends on the FEAGI version: z=9 is about 53 % on current
+  FEAGI and was about 10 % on FEAGI 2.1.43.
 - Nothing fires for `off_after_s` (default 0.15 s) → LED off. `--on-off` ignores brightness, so any firing gives 100 %.
 - The controller re-registers by itself when FEAGI loads a new genome or restarts.
 
@@ -114,23 +114,26 @@ LED Stop ──(inhibits)──▶ LED Enable ⟲ (self-latch) ──▶ Blink C
 - **Board keeps rebooting after wiring:** something is connected to a boot-strapping pin (0, 12 or 15). Move it.
 - **LED never lights from FEAGI:** make sure something actually fires in the opse area. Running without
   `--serial-port` prints every LED level the controller would send.
-- **`Device registration incomplete ... Positional Servo [output] (b3BzZQEBAQA=)`:** your `feagi` SDK is older than
-  the FEAGI core it is talking to (for example, SDK 2.1.43 against Neurorobotics Studio's FEAGI). Run
-  `pip install -U feagi` in the controller's venv.
-- **Blink off time resets to 0 after you re-save the genome (standalone FEAGI 2.1.43 only):** the exporter writes
+- **`Device registration incomplete ... Positional Servo [output] (b3BzZQEBAQA=)`, or the controller connects but the
+  LED never reacts:** your `feagi` SDK is older than 2.2.6. Run `pip install -r requirements.txt` (or
+  `pip install -U feagi`) in the controller's venv.
+- **Blink off time resets to 0 after you re-save the genome (old standalone FEAGI 2.1.43 only):** the exporter writes
   `…-nx-snooze-i`, but the loader only reads `…-nx-snooze-f` (an integer). Add a matching
   `"_____10c-<cortical id>-nx-snooze-f": <n>` line. The shipped genome includes both.
 
 ## FEAGI versions
 
-Tested with two setups:
+The controller needs **`feagi` 2.2.6 or newer** (`requirements.txt` enforces this). Older SDKs can't talk to the
+LED output area's current layout: depending on the loaded genome they either fail to register or register but never
+receive LED data.
 
-| FEAGI core | `feagi` SDK | Notes |
-|---|---|---|
-| Neurorobotics Studio's bundled FEAGI (Nov 2026) | 2.16.18 (`pip install -U feagi`) | opse has 3 subunits; the controller and FEAGI create the extra ones automatically |
-| Standalone `feagi start` 2.1.43 | 2.1.43 | opse has 2 subunits; see the snooze note under Troubleshooting |
+| `feagi` SDK | Against Neurorobotics Studio's bundled FEAGI (core 0.0.79) |
+|---|---|
+| 2.1.43 – 2.2.5 | ✗ no LED data |
+| 2.2.6, 2.2.7, 2.6.7, 2.6.12, 2.6.22, 2.16.18 | ✓ tested |
 
-The example genome loads and runs unchanged on both.
+The `feagi` package also installs a matching FEAGI core for `feagi start`, so a fresh `pip install -r requirements.txt`
+keeps the standalone core and the SDK in step. The example genome loads and runs unchanged.
 
 ## Standalone firmware
 
