@@ -1,0 +1,14 @@
+{
+  "_notes": "The LED is a one-device PositionalServo (opse) output area in cortical group cortical_group_id. The controller creates it on startup if the genome does not have it. Set serial.port to your ESP32's port (e.g. COM5, /dev/ttyUSB0), or pass --serial-port. Every field here can be overridden per run with a matching --flag.",
+  "led": {
+    "cortical_group_id": 0,
+    "channel": 0,
+    "off_after_s": 0.15,
+    "on_off": false
+  },
+  "serial": {
+    "port": null,
+    "baud": 115200
+  },
+  "loop_period_s": 0.02
+}

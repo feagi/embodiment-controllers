@@ -1,5 +1,9 @@
 # ESP32 Firmware Template Implementation Status
 
+> **Note (2026-11):** the Rust `firmware/controller/` described below has been replaced by the Arduino sketch in
+> `firmware/esp32_led/` and the Python `controller.py` (see `README.md`). The status below now applies to
+> `firmware/standalone/` only.
+
 ## ✅ Completed
 
 ### 1. Firmware Template Structure
