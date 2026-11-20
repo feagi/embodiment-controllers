@@ -9,8 +9,9 @@ The LED is driven by a one-device PositionalServo (``opse``) output area, a
 does not have it.
 
   * any neuron in the column fires   -> LED on. Brightness comes from the Z
-                                        level that fired (FEAGI's opse decoder:
-                                        z=0 -> 100 %, z=4 -> 60 %, z=9 -> 10 %)
+                                        level that fired: z=0 -> 100 %, higher z
+                                        is dimmer; the exact scale depends on the
+                                        FEAGI version
   * nothing fires for ``off_after_s`` -> LED off
 
 FEAGI's absolute opse decoder holds its last value, so the "no activity -> off"

@@ -1,5 +1,7 @@
 # FEAGI Python SDK (Apache-2.0): feagi.pns.brain_output, ServoMotor output,
 # FeagiHealthMonitor reconnect, and the genome REST client.
+# The SDK version must match the FEAGI core you connect to: use the latest
+# (`pip install -U feagi`) for Neurorobotics Studio's bundled FEAGI.
 feagi>=2.1.43
 
 # USB serial to the ESP32 (BSD-3-Clause).

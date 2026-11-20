@@ -40,7 +40,7 @@
     "feagi_core": {
       "min_version": "2.1.43",
       "max_version": null,
-      "tested_with": "2.1.43"
+      "tested_with": "2.1.43 (standalone) and Neurorobotics Studio bundled FEAGI with feagi SDK 2.16.18"
     },
     "python": {
       "min_version": "3.10.0",
@@ -156,7 +156,8 @@
       "changes": [
         "Replaces the Rust controller-mode firmware with an Arduino sketch + Python controller on the feagi SDK",
         "Auto-creates the opse LED area and reconnects after genome reloads",
-        "Example self-blinking genome controllable from the Brain Visualizer"
+        "Example self-blinking genome controllable from the Brain Visualizer",
+        "Works with both standalone FEAGI 2.1.43 and Neurorobotics Studio's newer FEAGI (3-subunit opse)"
       ]
     }
   ]
