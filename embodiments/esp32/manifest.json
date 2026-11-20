@@ -106,8 +106,8 @@
     {
       "id": "self-blink",
       "name": "Self-blinking LED",
-      "description": "Latch + square-wave oscillator genome with Start/Stop, on/off time and brightness controls in the Brain Visualizer",
-      "path": "",
+      "description": "Latch + square-wave oscillator genome (published on Brain Hub as \"ESP32 LED Blink\") with Start/Stop, on/off time and brightness controls in the Brain Visualizer",
+      "path": "https://brainsforrobots.com/hub/g-1795193117.1198",
       "genome": "genome/esp32_led_blink.genome",
       "connectome": "",
       "readme": "README.md",

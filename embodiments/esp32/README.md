@@ -84,9 +84,13 @@ If the loaded genome doesn't have this area, the controller creates it on startu
 | `t` | Blink three times (self-test) |
 | `?` | Print the current brightness |
 
-### Example genome: `genome/esp32_led_blink.genome`
+### Example genome: ESP32 LED Blink (Brain Hub)
 
 A self-blinking LED you can fully control from the Brain Visualizer. It runs at 20 Hz bursts.
+
+**Get it from Brain Hub:** [ESP32 LED Blink](https://brainsforrobots.com/hub/g-1795193117.1198). In Neurorobotics
+Studio, open **Brain Hub**, find *ESP32 LED Blink*, and click **Replace** to load it as the running brain. Or download
+it and load it with `feagi start` / the Brain Visualizer. An offline copy is in `genome/esp32_led_blink.genome`.
 
 ```
 LED Stop ──(inhibits)──▶ LED Enable ⟲ (self-latch) ──▶ Blink Clock ──(LED brightness)──▶ opse ──▶ LED
