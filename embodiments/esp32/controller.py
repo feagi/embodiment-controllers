@@ -15,7 +15,7 @@ does not have it.
 
 FEAGI's absolute opse decoder holds its last value, so the "no activity -> off"
 gate lives here. That makes the LED follow brain activity: a genome that pulses
-the area makes the LED blink (see genome/esp32_led_blink_genome.json).
+the area makes the LED blink (see genome/esp32_led_blink.genome).
 
 The controller also watches FEAGI's health endpoint and re-registers on its own
 when FEAGI loads a new genome or restarts.

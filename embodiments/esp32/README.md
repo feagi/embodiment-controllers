@@ -84,7 +84,7 @@ If the loaded genome doesn't have this area, the controller creates it on startu
 | `t` | Blink three times (self-test) |
 | `?` | Print the current brightness |
 
-### Example genome: `genome/esp32_led_blink_genome.json`
+### Example genome: `genome/esp32_led_blink.genome`
 
 A self-blinking LED you can fully control from the Brain Visualizer. It runs at 20 Hz bursts.
 
