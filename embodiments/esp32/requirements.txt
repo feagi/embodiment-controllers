@@ -1,6 +1,8 @@
 # FEAGI Python SDK (Apache-2.0): feagi.pns.brain_output, ServoMotor output,
 # FeagiHealthMonitor reconnect, and the genome REST client.
-feagi>=2.1.43
+# 2.2.6 is the first SDK that works with FEAGI's current PositionalServo layout
+# (2.2.5 and older connect but never receive LED data).
+feagi>=2.2.6
 
 # USB serial to the ESP32 (BSD-3-Clause).
 pyserial>=3.5
